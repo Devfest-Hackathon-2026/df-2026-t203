@@ -1,3 +1,27 @@
+# Project-specific ignores
+venv/
+.venv/
+ninjou/
+__pycache__/
+*.pyc
+.agents/
+.codex/
+student_records/
+fixes/
+youtube_extension/
+youtube_extension.zip
+keyposes/
+captured_vid.mp4
+fixed.py
+web_app/recordings_data/*.mp4
+web_app/recordings_data/*.webm
+web_app/teacher_videos/*.mp4
+!web_app/teacher_videos/vid_sample.mp4
+web_app/teacher_videos/*_dl.*
+web_app/teacher_videos/*_raw.*
+Motion_Capture/output/
+
+
 # 秘密情報（コミットしない）
 .env
 .env.*
@@ -20,10 +44,6 @@ build/
 out/
 .next/
 .wrangler/
-__pycache__/
-*.pyc
-.venv/
-venv/
 
 # OS とエディタ
 .DS_Store

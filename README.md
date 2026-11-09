@@ -1,38 +1,100 @@
-# DevFest Hackathon 2026 提出用リポジトリ
+# Ninjoucon 2026: Motion Capture Studio & Interactive Copy-Training
 
-  DevFest Hackathon 2026 のチームの **最終提出用** リポジトリです。提出期限までに、作品のコードと資料をこのリポジトリに置いてください。
+An AI-powered motion capture and interactive pose-copying training studio for martial arts, dance, and movement learning.
 
-  このリポジトリは **公開（public）** です。開催中も、運営・審査員・ほかの参加者が見られます。
+Built for **DevFest Hackathon 2026**.
 
-  ## はじめに
+---
 
-  1. GitHub から届いた招待を受け入れてください（招待の期限は 7 日です）
-  2. このリポジトリを clone して、提出物を置いてください
+## 🥋 Key Features
 
-  招待の期限が切れたときや、メンバーが変わったときは、運営に連絡してください。
+1. **Teacher Video Ingestion (YouTube & MP4)**:
+   - Upload any video file (`.mp4`, `.webm`, `.mov`) or paste any YouTube URL (downloaded and converted to browser-compatible H.264 via `yt-dlp` and `ffmpeg`).
 
-  ## 開発用のリポジトリは別に作ることをおすすめします
+2. **Automated Keypose & Trajectory Extraction**:
+   - Analyzes movement velocity and kinetic energy peaks using Google MediaPipe Pose to segment videos into keyposes and DTW trajectories.
 
-  このリポジトリでは **GitHub Actions と GitHub Pages が使えません**。CI やデプロイ、Pages での公開をしたいときは、チームで開発用のリポジトリを別に作ってください。
+3. **Integrated Video Player & Checkpoints**:
+   - Interactive checkpoint intervals slider with repeating ghost markers and keypose ticks along the video timeline.
+   - Built-in expandable OpenCV webcam feedback overlay.
 
-  - 開発用のリポジトリは、チームのメンバーのアカウントや、チームで作った Organization に作ってください
-  - 開発はそちらで進めて、提出期限までに最終版のコードと資料をこのリポジトリに push してください
-  - 審査はこのリポジトリの内容で行います。開発用のリポジトリにしかないものは、審査の対象になりません
-  - デプロイした作品の URL があれば、この README に書いてください
+4. **Real-time Pose-Copying & Adaptive Playback**:
+   - The teacher video pauses at each keypose and **only plays forward when the student matches and holds the target pose**.
+   - Displays real-time joint correction arrows (Euclidean error) and gesture recognition (`Thumb_Up` / `Thumb_Down` for checkpoint replay).
+   - Dynamic Time Warping (DTW) movement scoring during transitions.
 
-  ## 秘密情報をコミットしない
+5. **Clean Video Recording for Motion Capture**:
+   - The user's raw webcam feed is recorded cleanly (without overlaid arrows/skeletons) so it is ready for high-precision 3D mocap.
+   - Grouped neatly under each teacher video's expandable subdirectory in the sidebar.
 
-  API キー・パスワード・サービスアカウントの鍵などは、**絶対にコミットしないでください**。公開リポジトリなので、push
-  した時点で誰でも見られます。開発用のリポジトリから持ってくるときも、履歴ごと push すると、過去のコミットに含まれる秘密情報も公開されます。
+6. **3D Motion Capture Pipeline (Y Bot)**:
+   - Extracts 33 full-body landmarks with OneEuro filtering, parent-relative limb holding, and joint angle stabilization.
+   - Retargets motion onto the **Y Bot** armature in Blender headlessly, outputting animated `.glb`, `.blend`, and `.fbx` files.
 
-  - 秘密情報は `.env` や `.dev.vars` などに書き、コミットしない（`.gitignore` に入れてあります）
-  - 誤って push したら、すぐにキー（鍵）を無効にして作り直し、運営に連絡してください。履歴から消すだけでは不十分です
-  - GitHub の push protection が、よく知られた形式のキーの push を止めることがあります。止められたら、そのキーをコミットから外してください
+7. **Synchronized 3D & Real-Life Playback**:
+   - WebGL Three.js 3D viewer featuring side-by-side comparison with the student's real-life video, locked to a shared scrubber.
+   - Camera view presets (Perspective, Front, Side, Upper body), speed controls, and one-click downloads.
 
-  ## 提出
+8. **Test Motion Capture (Misc.)**:
+   - Quick one-click standalone recording and testing of the 3D Motion Capture pipeline without requiring a teacher video.
 
-  提出の方法と締切は、運営からの案内に従ってください。提出期限を過ぎると、このリポジトリは読み取り専用になり、push できなくなります。
+---
 
-  ## ライセンス
+## 🚀 Quick Start
 
-  [MIT License](LICENSE) です。ほかのライセンスにしたいときは、LICENSE を書き換えてください。
+### Prerequisites
+- **Python 3.10+** (with virtual environment in `venv`)
+- **Blender 4.0+** (accessible in PATH or default install location `C:\Program Files\Blender Foundation\Blender 4.x\blender.exe`)
+- **ffmpeg** (accessible in PATH)
+
+### 1. Install Dependencies
+```bash
+pip install -r requirements.txt
+pip install -r Motion_Capture/requirements.txt
+```
+
+### 2. Launch the Web Application
+Double-click `run_app.bat` or run:
+```bash
+python web_app/run_server.py
+```
+Open **[http://localhost:8000](http://localhost:8000)** in your browser.
+
+---
+
+## 📂 Project Structure
+
+```
+ninjoucon2026/
+├── Motion_Capture/              # 3D motion capture and Blender retargeting pipeline
+│   ├── extract_landmarks.py     # MediaPipe landmark extraction
+│   ├── postprocess_landmarks.py # OneEuro filtering, limb stabilization & gap-filling
+│   ├── blender_retarget.py      # Headless Blender retargeting to Y Bot
+│   └── run_pipeline.py          # Unified pipeline runner (outputs .glb, .blend, .fbx)
+├── web_app/                     # FastAPI studio server and Three.js frontend
+│   ├── app.py                   # REST & WebSocket backend
+│   ├── training_session.py      # Interactive copy-training engine & clean webcam recorder
+│   ├── run_server.py            # Uvicorn launcher
+│   ├── static/                  # HTML, CSS, Three.js modules, AvatarViewer
+│   └── teacher_videos/          # Stored videos and extracted keyposes
+├── utilities/                   # MediaPipe vision, gesture recognition & DTW scoring
+│   ├── mediapipeline.py         # Real-time MediaPipe pose landmarker
+│   ├── video_mediapipeline.py   # Video-stream MediaPipe processing
+│   ├── dtw_scoring.py           # Euclidean joint distance & DTW scoring
+│   ├── handrecognizer.py        # Gesture detection (Thumb_Up/Down)
+│   └── preprocess.py            # Kinetic energy velocity keypose extractor
+├── Y Bot.fbx                    # Target humanoid rig for motion capture
+├── pose_landmarker_full.task    # Google MediaPipe Pose Landmarker task model
+├── run_app.bat                  # One-click Windows startup script
+├── requirements.txt             # Project dependencies
+└── README.md
+```
+
+---
+
+## 📜 DevFest Hackathon 2026 提出情報
+
+DevFest Hackathon 2026 チーム提出用リポジトリです。作品の全コード・モデル・Webアプリケーションスタジオが含まれています。
+
+### ライセンス
+[MIT License](LICENSE)

@@ -1,0 +1,5 @@
+Extract landmark:
+smoothing is off for now to see how it is, can be fixed later
+remove the assign hands and also make argument parsing
+
+remove palm orientation?

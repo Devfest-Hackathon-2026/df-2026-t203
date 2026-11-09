@@ -1,0 +1,26 @@
+[
+  {
+    "id": "vid_sample",
+    "name": "Sample Video (captured_vid)",
+    "source_type": "mp4",
+    "source_url": null,
+    "filename": "vid_sample.mp4",
+    "created_at": "Nov 09, 2026, 08:03 PM",
+    "is_processed": true,
+    "status": "ready",
+    "keyposes_dir": "vid_sample_keyposes",
+    "keypose_count": 8,
+    "timestamps": {
+      "0": 0.1,
+      "1": 3.1666666666666665,
+      "2": 4.366666666666666,
+      "3": 6.1,
+      "4": 10.233333333333333,
+      "5": 12.1,
+      "6": 13.366666666666667,
+      "7": 14.299999999999999
+    },
+    "checkpoint_interval": null,
+    "checkpoint_poses": 8
+  }
+]
