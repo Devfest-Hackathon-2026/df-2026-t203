@@ -1,0 +1,11 @@
+{$MOTIONLEARN_HOST} {
+	basic_auth {
+		judge {$MOTIONLEARN_PASSWORD_HASH}
+	}
+	request_body {
+		max_size 110MB
+	}
+	reverse_proxy 127.0.0.1:8000 {
+		header_up -Authorization
+	}
+}

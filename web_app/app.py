@@ -11,20 +11,27 @@ Integrates:
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from datetime import datetime
 import json
+import logging
+import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
 import threading
 from typing import Any, Dict, List
+from urllib.parse import urlparse
+from uuid import uuid4
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 
 # Ensure workspace root is on sys.path so `utilities` and `training_session` import cleanly
 WEB_APP_DIR = Path(__file__).resolve().parent
@@ -35,13 +42,17 @@ if str(WEB_APP_DIR) not in sys.path:
     sys.path.insert(0, str(WEB_APP_DIR))
 
 from training_session import build_keypose_sync_for_recording, run_web_training_session  # noqa: E402
+from browser_training import run_browser_training  # noqa: E402
 
-RECORDINGS_DATA_DIR = WEB_APP_DIR / "recordings_data"
-TEACHER_VIDEOS_DIR = WEB_APP_DIR / "teacher_videos"
+DATA_DIR = Path(os.environ["MOTIONLEARN_DATA_DIR"]).resolve() if "MOTIONLEARN_DATA_DIR" in os.environ else None
+PRODUCT_DIST = Path(os.environ["MOTIONLEARN_DIST"]).resolve() if "MOTIONLEARN_DIST" in os.environ else None
+PUBLIC_ORIGIN = os.getenv("MOTIONLEARN_ORIGIN")
+RECORDINGS_DATA_DIR = (DATA_DIR or WEB_APP_DIR) / "recordings_data"
+TEACHER_VIDEOS_DIR = (DATA_DIR or WEB_APP_DIR) / "teacher_videos"
 STATIC_DIR = WEB_APP_DIR / "static"
 MOTION_CAPTURE_DIR = WORKSPACE_DIR / "Motion_Capture"
 PIPELINE_SCRIPT = MOTION_CAPTURE_DIR / "run_pipeline.py"
-OUTPUTS_DIR = MOTION_CAPTURE_DIR / "output"
+OUTPUTS_DIR = (DATA_DIR or MOTION_CAPTURE_DIR) / "output"
 PYTHON_EXE = WORKSPACE_DIR / "venv" / "Scripts" / "python.exe"
 DOJO_GLB_PATH = WORKSPACE_DIR / "Dojo.glb"
 
@@ -52,12 +63,35 @@ OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 METADATA_FILE = RECORDINGS_DATA_DIR / "recordings.json"
 VIDEOS_META_FILE = TEACHER_VIDEOS_DIR / "videos.json"
 
-app = FastAPI(title="Ninjoucon Mocap Studio")
+@asynccontextmanager
+async def lifespan(_app):
+    if DATA_DIR is not None:
+        if not VIDEOS_META_FILE.exists():
+            seed = WEB_APP_DIR / "teacher_videos"
+            shutil.copy2(seed / "vid_sample.mp4", TEACHER_VIDEOS_DIR)
+            shutil.copytree(seed / "vid_sample_keyposes", TEACHER_VIDEOS_DIR / "vid_sample_keyposes", dirs_exist_ok=True)
+            shutil.copy2(seed / "videos.json", VIDEOS_META_FILE)
+        if not METADATA_FILE.exists():
+            save_metadata_locked([])
+    with metadata_lock:
+        for load, save in ((load_videos_locked, save_videos_locked), (load_recordings_locked, save_metadata_locked)):
+            items = load()
+            interrupted = [item for item in items if item.get("status") == "processing"]
+            for item in interrupted:
+                item.update(status="error", error_message="Processing was interrupted. Retry to continue.")
+            if interrupted:
+                save(items)
+    for directory in RECORDINGS_DATA_DIR.glob(".take-*"):
+        if directory.is_dir():
+            shutil.rmtree(directory)
+    yield
+
+
+app = FastAPI(title="MotionLearn", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=[] if PUBLIC_ORIGIN else ["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -65,9 +99,12 @@ app.add_middleware(
 
 @app.middleware("http")
 async def disable_static_and_api_cache(request, call_next):
+    origin = request.headers.get("origin")
+    if PUBLIC_ORIGIN and origin and origin != PUBLIC_ORIGIN and request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+        return JSONResponse({"detail": "Request origin is not allowed."}, status_code=403)
     response = await call_next(request)
     path = request.url.path
-    if path == "/" or path.startswith("/static/") or path.startswith("/api/"):
+    if path in {"/", "/training", "/analysis"} or path.startswith(("/static/", "/api/")):
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         response.headers["Pragma"] = "no-cache"
         response.headers["Expires"] = "0"
@@ -77,8 +114,15 @@ async def disable_static_and_api_cache(request, call_next):
 active_logs: Dict[str, List[str]] = {}
 active_stages: Dict[str, str] = {}
 video_keypose_logs: Dict[str, List[str]] = {}
-processing_threads: Dict[str, threading.Thread] = {}
-metadata_lock = threading.Lock()
+jobs = ThreadPoolExecutor(max_workers=1, thread_name_prefix="motionlearn")
+metadata_lock = threading.RLock()
+active_browser_videos: set[str] = set()
+
+
+def write_json(path, data):
+    temp = path.with_suffix(".tmp")
+    temp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    temp.replace(path)
 
 
 class YouTubeRequest(BaseModel):
@@ -112,7 +156,7 @@ def compute_checkpoint_boundary(timestamps: Dict[str, float], checkpoint_interva
     return max(1, point)
 
 
-def convert_to_browser_mp4(src_path: Path, dest_path: Path) -> None:
+def convert_to_browser_mp4(src_path: Path, dest_path: Path, *, strict=False) -> None:
     """Convert/remux any video file to browser-compatible H.264 MP4."""
     ffmpeg_exe = shutil.which("ffmpeg")
     if ffmpeg_exe:
@@ -122,6 +166,7 @@ def convert_to_browser_mp4(src_path: Path, dest_path: Path) -> None:
                 "-y",
                 "-i",
                 str(src_path),
+                "-map", "0:v:0", "-map", "0:a?",
                 "-c:v",
                 "libx264",
                 "-preset",
@@ -136,12 +181,16 @@ def convert_to_browser_mp4(src_path: Path, dest_path: Path) -> None:
                 "aac",
                 str(dest_path),
             ]
-            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(cmd, check=True, timeout=180, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             if src_path != dest_path:
                 src_path.unlink(missing_ok=True)
             return
         except Exception:
             pass
+    if strict:
+        dest_path.unlink(missing_ok=True)
+        src_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=422, detail="Could not convert the video to MP4. Check the file and try again.")
     if src_path != dest_path:
         if dest_path.exists():
             dest_path.unlink(missing_ok=True)
@@ -184,7 +233,7 @@ def load_videos_locked() -> List[Dict[str, Any]]:
 
 
 def save_videos_locked(videos: List[Dict[str, Any]]) -> None:
-    VIDEOS_META_FILE.write_text(json.dumps(videos, indent=2), encoding="utf-8")
+    write_json(VIDEOS_META_FILE, videos)
 
 
 def renumber_recordings_locked(items: List[Dict[str, Any]]) -> None:
@@ -252,7 +301,7 @@ def load_recordings_locked() -> List[Dict[str, Any]]:
                     if item.get("teacher_video_filename") != parent_vid.get("filename"):
                         item["teacher_video_filename"] = parent_vid.get("filename")
                         changed = True
-                    if not item.get("keypose_sync") and parent_vid.get("keyposes_dir"):
+                    if not item.get("browser_take") and not item.get("keypose_sync") and parent_vid.get("keyposes_dir"):
                         rec_file = RECORDINGS_DATA_DIR / item.get("filename", "")
                         kp_dir = TEACHER_VIDEOS_DIR / parent_vid["keyposes_dir"]
                         item["keypose_sync"] = build_keypose_sync_for_recording(rec_file, kp_dir)
@@ -266,7 +315,7 @@ def load_recordings_locked() -> List[Dict[str, Any]]:
 
 
 def save_metadata_locked(data: List[Dict[str, Any]]) -> None:
-    METADATA_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    write_json(METADATA_FILE, data)
 
 
 def load_metadata() -> List[Dict[str, Any]]:
@@ -326,6 +375,7 @@ def register_new_recording(
     rec_id: str,
     formatted_date: str,
     keypose_sync: List[Dict[str, Any]] | None = None,
+    feedback: list | None = None,
 ) -> Dict[str, Any]:
     with metadata_lock:
         items = load_recordings_locked()
@@ -347,7 +397,15 @@ def register_new_recording(
         }
         items.insert(0, new_item)
         renumber_recordings_locked(items)
-        save_metadata_locked(items)
+        feedback_file = RECORDINGS_DATA_DIR / f"{rec_id}.feedback.json"
+        if feedback is not None:
+            new_item["browser_take"] = True
+            write_json(feedback_file, feedback)
+        try:
+            save_metadata_locked(items)
+        except OSError:
+            feedback_file.unlink(missing_ok=True)
+            raise
         return new_item
 
 
@@ -355,7 +413,6 @@ def register_new_recording(
 # Background Workers (Keypose Extraction & Mocap Pipeline)
 # ---------------------------------------------------------------------------
 def run_keyposes_worker(video_id: str, video_path: Path, keyposes_dir: Path) -> None:
-    keyposes_dir.mkdir(parents=True, exist_ok=True)
     video_keypose_logs[video_id] = [f"[init] Extracting keyposes from {video_path.name}..."]
 
     out_keyposes = keyposes_dir / "teacher_keyposes.json"
@@ -364,6 +421,9 @@ def run_keyposes_worker(video_id: str, video_path: Path, keyposes_dir: Path) -> 
     try:
         from utilities.preprocess import generate_keyposes_new
 
+        keyposes_dir.mkdir(parents=True, exist_ok=True)
+        for path in (out_keyposes, out_timestamps, keyposes_dir / "teacher_trajectories.json"):
+            path.unlink(missing_ok=True)
         video_keypose_logs[video_id].append("[mediapipe] Analyzing full-body velocity and movement peaks...")
         generate_keyposes_new(
             str(video_path),
@@ -374,6 +434,8 @@ def run_keyposes_worker(video_id: str, video_path: Path, keyposes_dir: Path) -> 
 
         if out_timestamps.exists() and out_keyposes.exists():
             raw_ts = json.loads(out_timestamps.read_text(encoding="utf-8"))
+            if not raw_ts:
+                raise ValueError("No usable keyposes were detected.")
             timestamps = {str(k): float(v) for k, v in raw_ts.items()}
             video_info = get_video_by_id(video_id) or {}
             cp_interval = video_info.get("checkpoint_interval")
@@ -391,14 +453,13 @@ def run_keyposes_worker(video_id: str, video_path: Path, keyposes_dir: Path) -> 
             })
         else:
             video_keypose_logs[video_id].append("[error] Not enough valid pose frames detected in video.")
-            update_video(video_id, {"status": "error"})
+            update_video(video_id, {"status": "error", "error_message": "No usable keyposes were detected."})
     except Exception as exc:
         video_keypose_logs[video_id].append(f"[exception] {exc}")
-        update_video(video_id, {"status": "error"})
+        update_video(video_id, {"status": "error", "error_message": str(exc)})
 
 
 def run_pipeline_worker(rec_id: str, video_path: Path, output_dir: Path) -> None:
-    output_dir.mkdir(parents=True, exist_ok=True)
     active_logs[rec_id] = [f"[init] Starting motion capture pipeline for {video_path.name}..."]
     active_stages[rec_id] = "Starting..."
 
@@ -416,6 +477,7 @@ def run_pipeline_worker(rec_id: str, video_path: Path, output_dir: Path) -> None
     active_logs[rec_id].append(f"[exec] {' '.join(cmd)}")
 
     try:
+        output_dir.mkdir(parents=True, exist_ok=True)
         process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -457,7 +519,7 @@ def run_pipeline_worker(rec_id: str, video_path: Path, output_dir: Path) -> None
             rec_item = get_recording_by_id(rec_id) or {}
             keypose_sync = rec_item.get("keypose_sync") or []
             vid_id = rec_item.get("video_id")
-            if vid_id and vid_id != "misc_mocap" and not keypose_sync:
+            if vid_id and vid_id != "misc_mocap" and not keypose_sync and not rec_item.get("browser_take"):
                 parent_vid = get_video_by_id(vid_id)
                 if parent_vid and parent_vid.get("keyposes_dir"):
                     kp_dir = TEACHER_VIDEOS_DIR / parent_vid["keyposes_dir"]
@@ -512,9 +574,10 @@ def list_videos():
 async def upload_teacher_video(
     video: UploadFile = File(...),
     name: str | None = Form(None),
+    auto_process: bool = False,
 ):
     timestamp = datetime.now()
-    vid_id = f"vid_{timestamp.strftime('%Y%m%d_%H%M%S')}"
+    vid_id = f"vid_{uuid4().hex}"
     formatted_date = timestamp.strftime("%b %d, %Y, %I:%M %p")
 
     raw_name = Path(video.filename or "video.mp4").stem
@@ -524,10 +587,7 @@ async def upload_teacher_video(
     temp_path = TEACHER_VIDEOS_DIR / f"{vid_id}_raw{raw_ext}"
     final_path = TEACHER_VIDEOS_DIR / f"{vid_id}.mp4"
 
-    with open(temp_path, "wb") as buffer:
-        shutil.copyfileobj(video.file, buffer)
-
-    convert_to_browser_mp4(temp_path, final_path)
+    await run_in_threadpool(store_upload, video, temp_path, final_path, auto_process)
 
     new_video = {
         "id": vid_id,
@@ -551,17 +611,27 @@ async def upload_teacher_video(
         save_videos_locked(videos)
 
     new_video["recordings"] = []
+    if auto_process:
+        process_teacher_video_keyposes(vid_id)
+        new_video["status"] = "processing"
     return new_video
 
 
 @app.post("/api/videos/youtube")
-def add_youtube_video(req: YouTubeRequest):
+def add_youtube_video(req: YouTubeRequest, auto_process: bool = False):
     url = req.url.strip()
-    if not url:
-        raise HTTPException(status_code=400, detail="YouTube URL is required")
+    try:
+        parsed = urlparse(url)
+        valid = parsed.scheme in {"https", "http"} and parsed.netloc.lower() in {
+            "youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be",
+        }
+    except ValueError:
+        valid = False
+    if not valid:
+        raise HTTPException(status_code=400, detail="Enter a YouTube video URL.")
 
     timestamp = datetime.now()
-    vid_id = f"vid_{timestamp.strftime('%Y%m%d_%H%M%S')}"
+    vid_id = f"vid_{uuid4().hex}"
     formatted_date = timestamp.strftime("%b %d, %Y, %I:%M %p")
     final_path = TEACHER_VIDEOS_DIR / f"{vid_id}.mp4"
 
@@ -574,7 +644,13 @@ def add_youtube_video(req: YouTubeRequest):
             "outtmpl": outtmpl,
             "merge_output_format": "mp4",
             "noplaylist": True,
+            "allowed_extractors": ["youtube"],
+            "max_filesize": 100 * 1024 * 1024,
+            "socket_timeout": 20,
+            "retries": 1,
         }
+        if shutil.which("node"):
+            ydl_opts["js_runtimes"] = {"node": {}}
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info_dict = ydl.extract_info(url, download=True)
             title = (req.name or "").strip() or info_dict.get("title") or f"YouTube Video ({vid_id})"
@@ -583,6 +659,8 @@ def add_youtube_video(req: YouTubeRequest):
             else:
                 downloaded_file = Path(ydl.prepare_filename(info_dict))
     except Exception as exc:
+        for partial in TEACHER_VIDEOS_DIR.glob(f"{vid_id}_dl.*"):
+            partial.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail=f"Failed to download YouTube video: {exc}") from exc
 
     if not downloaded_file.exists():
@@ -591,7 +669,11 @@ def add_youtube_video(req: YouTubeRequest):
             raise HTTPException(status_code=500, detail="Downloaded YouTube file not found on disk")
         downloaded_file = matches[0]
 
-    convert_to_browser_mp4(downloaded_file, final_path)
+    try:
+        convert_to_browser_mp4(downloaded_file, final_path, strict=auto_process)
+    finally:
+        for partial in TEACHER_VIDEOS_DIR.glob(f"{vid_id}_dl.*"):
+            partial.unlink(missing_ok=True)
 
     new_video = {
         "id": vid_id,
@@ -615,31 +697,27 @@ def add_youtube_video(req: YouTubeRequest):
         save_videos_locked(videos)
 
     new_video["recordings"] = []
+    if auto_process:
+        process_teacher_video_keyposes(vid_id)
+        new_video["status"] = "processing"
     return new_video
 
 
 @app.post("/api/videos/{video_id}/process")
 def process_teacher_video_keyposes(video_id: str):
-    video = get_video_by_id(video_id)
-    if not video:
-        raise HTTPException(status_code=404, detail="Teacher video not found")
-
-    if video.get("status") == "processing":
-        return {"message": "Already extracting keyposes", "status": "processing"}
-
-    video_path = TEACHER_VIDEOS_DIR / video["filename"]
-    if not video_path.exists():
-        raise HTTPException(status_code=404, detail="Teacher video file missing")
-
-    keyposes_dir = TEACHER_VIDEOS_DIR / video["keyposes_dir"]
-    update_video(video_id, {"status": "processing"})
-
-    t = threading.Thread(
-        target=run_keyposes_worker,
-        args=(video_id, video_path, keyposes_dir),
-        daemon=True,
-    )
-    t.start()
+    with metadata_lock:
+        video = get_video_by_id(video_id)
+        if not video:
+            raise HTTPException(status_code=404, detail="Teacher video not found")
+        if video.get("status") in {"processing", "ready"}:
+            return {"status": video["status"]}
+        video_path = TEACHER_VIDEOS_DIR / video["filename"]
+        if not video_path.is_file():
+            raise HTTPException(status_code=404, detail="Teacher video file missing")
+        keyposes_dir = TEACHER_VIDEOS_DIR / video["keyposes_dir"]
+        video_keypose_logs[video_id] = []
+        update_video(video_id, {"status": "processing", "error_message": None})
+        jobs.submit(run_keyposes_worker, video_id, video_path, keyposes_dir)
     return {"message": "Keypose extraction started", "status": "processing"}
 
 
@@ -658,6 +736,7 @@ def get_teacher_video_status(video_id: str):
         "checkpoint_interval": video.get("checkpoint_interval"),
         "checkpoint_poses": video.get("checkpoint_poses", 5),
         "logs": video_keypose_logs.get(video_id, []),
+        "error_message": video.get("error_message"),
     }
 
 
@@ -683,9 +762,20 @@ def set_video_checkpoint(video_id: str, req: CheckpointRequest):
 
 @app.delete("/api/videos/{video_id}")
 def delete_teacher_video(video_id: str):
-    video = get_video_by_id(video_id)
-    if not video:
-        raise HTTPException(status_code=404, detail="Teacher video not found")
+    with metadata_lock:
+        video = get_video_by_id(video_id)
+        if not video:
+            raise HTTPException(status_code=404, detail="Teacher video not found")
+        recordings = load_recordings_locked()
+        if video_id in active_browser_videos or video.get("status") == "processing" or any(
+            rec.get("video_id") == video_id and rec.get("status") == "processing" for rec in recordings
+        ):
+            raise HTTPException(status_code=409, detail="Cannot delete a teacher video while it is in use.")
+        return delete_teacher_media(video, recordings)
+
+
+def delete_teacher_media(video, recordings):
+    video_id = video["id"]
 
     # Delete teacher video file and keyposes dir
     (TEACHER_VIDEOS_DIR / video["filename"]).unlink(missing_ok=True)
@@ -697,11 +787,11 @@ def delete_teacher_video(video_id: str):
         videos = [v for v in load_videos_locked() if v["id"] != video_id]
         save_videos_locked(videos)
 
-        recordings = load_recordings_locked()
         kept_recordings = []
         for rec in recordings:
             if rec.get("video_id") == video_id:
                 (RECORDINGS_DATA_DIR / rec["filename"]).unlink(missing_ok=True)
+                (RECORDINGS_DATA_DIR / f"{rec['id']}.feedback.json").unlink(missing_ok=True)
                 out_dir = OUTPUTS_DIR / rec["output_dir_name"]
                 if out_dir.exists() and rec["output_dir_name"] != "test":
                     shutil.rmtree(out_dir, ignore_errors=True)
@@ -718,6 +808,10 @@ def delete_teacher_video(video_id: str):
 # ---------------------------------------------------------------------------
 @app.websocket("/ws/training/{video_id}")
 async def training_websocket(websocket: WebSocket, video_id: str):
+    browser = websocket.query_params.get("camera") == "browser"
+    if PUBLIC_ORIGIN and websocket.headers.get("origin") != PUBLIC_ORIGIN:
+        await websocket.close(code=1008)
+        return
     await websocket.accept()
     video = get_video_by_id(video_id)
     if not video:
@@ -735,13 +829,13 @@ async def training_websocket(websocket: WebSocket, video_id: str):
 
     keyposes_dir = TEACHER_VIDEOS_DIR / video["keyposes_dir"]
     timestamp = datetime.now()
-    rec_id = f"rec_{timestamp.strftime('%Y%m%d_%H%M%S')}"
+    rec_id = f"rec_{uuid4().hex}"
     formatted_date = timestamp.strftime("%b %d, %Y, %I:%M %p")
 
     raw_recording_path = RECORDINGS_DATA_DIR / f"{rec_id}_raw.mp4"
     final_recording_path = RECORDINGS_DATA_DIR / f"{rec_id}.mp4"
 
-    def on_saved(final_path: Path, keypose_sync: List[Dict[str, Any]] | None = None) -> Dict[str, Any]:
+    def on_saved(final_path: Path, keypose_sync: List[Dict[str, Any]] | None = None, feedback=None) -> Dict[str, Any]:
         return register_new_recording(
             video_id=video["id"],
             video_name=video["name"],
@@ -749,20 +843,55 @@ async def training_websocket(websocket: WebSocket, video_id: str):
             rec_id=rec_id,
             formatted_date=formatted_date,
             keypose_sync=keypose_sync,
+            feedback=feedback,
         )
 
+    if browser:
+        with metadata_lock:
+            busy = video_id in active_browser_videos or not get_video_by_id(video_id)
+            if not busy:
+                active_browser_videos.add(video_id)
+        if busy:
+            await websocket.send_json({"type": "ERROR", "message": "This video is unavailable or already in a training session."})
+            await websocket.close()
+            return
+
+    def save_browser(path, sync, feedback):
+        with metadata_lock:
+            recording = on_saved(path, sync, feedback)
+            try:
+                status = process_recording(rec_id)["status"]
+            except Exception:
+                logging.exception("Could not queue the saved recording")
+                status = "error"
+                update_recording(rec_id, {"status": status, "error_message": "Could not queue 3D processing. Retry to continue."})
+        return {**recording, "status": status}
+
     try:
-        await run_web_training_session(
-            websocket=websocket,
-            video_info=video,
-            keyposes_dir=keyposes_dir,
-            raw_recording_path=raw_recording_path,
-            final_recording_path=final_recording_path,
-            on_recording_saved=on_saved,
-        )
+        if browser:
+            await run_browser_training(websocket, video, keyposes_dir, final_recording_path, save_browser)
+        else:
+            await run_web_training_session(
+                websocket=websocket,
+                video_info=video,
+                keyposes_dir=keyposes_dir,
+                raw_recording_path=raw_recording_path,
+                final_recording_path=final_recording_path,
+                on_recording_saved=on_saved,
+            )
     except WebSocketDisconnect:
         pass
+    except Exception as exc:
+        logging.exception("Training session failed")
+        message = str(exc) if isinstance(exc, ValueError) else "Training ended before it could finish. Please try again."
+        try:
+            await websocket.send_json({"type": "ERROR", "message": message})
+        except (RuntimeError, WebSocketDisconnect):
+            pass
     finally:
+        if browser:
+            with metadata_lock:
+                active_browser_videos.discard(video_id)
         try:
             await websocket.close()
         except Exception:
@@ -777,10 +906,22 @@ def list_recordings():
     return load_metadata()
 
 
+def store_upload(video, temp_path, final_path, strict):
+    if video.size is not None and video.size > 100 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Upload a video smaller than 100 MB.")
+    try:
+        with temp_path.open("wb") as buffer:
+            shutil.copyfileobj(video.file, buffer)
+        convert_to_browser_mp4(temp_path, final_path, strict=strict)
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
 @app.post("/api/recordings/upload")
 async def upload_recording(
     video: UploadFile = File(...),
     video_id: str | None = Form(None),
+    auto_process: bool = False,
 ):
     target_vid_id = (video_id or "misc_mocap").strip() or "misc_mocap"
     target_vid_name = "Test Motion Capture (Misc.)"
@@ -799,54 +940,44 @@ async def upload_recording(
         target_vid_name = matched_video["name"]
 
     timestamp = datetime.now()
-    rec_id = f"rec_{timestamp.strftime('%Y%m%d_%H%M%S')}"
+    rec_id = f"rec_{uuid4().hex}"
     formatted_date = timestamp.strftime("%b %d, %Y, %I:%M %p")
 
     raw_ext = Path(video.filename or "video.mp4").suffix or ".mp4"
     temp_path = RECORDINGS_DATA_DIR / f"{rec_id}_raw{raw_ext}"
     final_path = RECORDINGS_DATA_DIR / f"{rec_id}.mp4"
 
-    with open(temp_path, "wb") as buffer:
-        shutil.copyfileobj(video.file, buffer)
+    await run_in_threadpool(store_upload, video, temp_path, final_path, auto_process)
 
-    convert_to_browser_mp4(temp_path, final_path)
-
-    return register_new_recording(
+    recording = register_new_recording(
         video_id=target_vid_id,
         video_name=target_vid_name,
         final_path=final_path,
         rec_id=rec_id,
         formatted_date=formatted_date,
     )
+    if auto_process:
+        process_recording(rec_id)
+        recording["status"] = "processing"
+    return recording
 
 
 @app.post("/api/recordings/{rec_id}/process")
 def process_recording(rec_id: str):
-    item = get_recording_by_id(rec_id)
-    if not item:
-        raise HTTPException(status_code=404, detail="Recording not found")
-
-    if item.get("status") == "processing":
-        return {"message": "Already processing", "status": "processing"}
-
-    video_path = RECORDINGS_DATA_DIR / item["filename"]
-    if not video_path.exists():
-        raise HTTPException(status_code=404, detail="Source video file missing")
-
-    output_dir = OUTPUTS_DIR / item["output_dir_name"]
-
-    update_recording(rec_id, {
-        "status": "processing",
-        "error_message": None,
-    })
-
-    t = threading.Thread(
-        target=run_pipeline_worker,
-        args=(rec_id, video_path, output_dir),
-        daemon=True,
-    )
-    processing_threads[rec_id] = t
-    t.start()
+    with metadata_lock:
+        item = get_recording_by_id(rec_id)
+        if not item:
+            raise HTTPException(status_code=404, detail="Recording not found")
+        if item.get("status") in {"processing", "completed"}:
+            return {"status": item["status"]}
+        video_path = RECORDINGS_DATA_DIR / item["filename"]
+        if not video_path.is_file():
+            raise HTTPException(status_code=404, detail="Source video file missing")
+        output_dir = OUTPUTS_DIR / item["output_dir_name"]
+        active_stages[rec_id] = "Queued"
+        active_logs[rec_id] = []
+        update_recording(rec_id, {"status": "processing", "error_message": None})
+        jobs.submit(run_pipeline_worker, rec_id, video_path, output_dir)
 
     return {"message": "Processing started", "status": "processing"}
 
@@ -863,22 +994,38 @@ def get_recording_status(rec_id: str):
         "is_processed": item.get("is_processed", False),
         "stage": active_stages.get(rec_id, ""),
         "logs": active_logs.get(rec_id, []),
+        "error_message": item.get("error_message"),
         "glb_url": f"/outputs/{item['output_dir_name']}/{item['glb_filename']}" if item.get("glb_filename") else None,
         "blend_url": f"/outputs/{item['output_dir_name']}/{item['blend_filename']}" if item.get("blend_filename") else None,
         "fbx_url": f"/outputs/{item['output_dir_name']}/{item['fbx_filename']}" if item.get("fbx_filename") else None,
     }
 
 
+@app.get("/api/recordings/{rec_id}/feedback")
+def get_recording_feedback(rec_id: str):
+    if not get_recording_by_id(rec_id):
+        raise HTTPException(status_code=404, detail="Recording not found")
+    path = RECORDINGS_DATA_DIR / f"{rec_id}.feedback.json"
+    return FileResponse(path, media_type="application/json") if path.is_file() else []
+
+
 @app.delete("/api/recordings/{rec_id}")
 def delete_recording(rec_id: str):
-    item = get_recording_by_id(rec_id)
-    if not item:
-        raise HTTPException(status_code=404, detail="Recording not found")
-    if item.get("status") == "processing":
-        raise HTTPException(status_code=409, detail="Cannot delete a recording while it is processing")
+    with metadata_lock:
+        item = get_recording_by_id(rec_id)
+        if not item:
+            raise HTTPException(status_code=404, detail="Recording not found")
+        if item.get("status") == "processing":
+            raise HTTPException(status_code=409, detail="Cannot delete a recording while it is processing")
+        return delete_recording_media(item)
+
+
+def delete_recording_media(item):
+    rec_id = item["id"]
 
     video_path = RECORDINGS_DATA_DIR / item["filename"]
     video_path.unlink(missing_ok=True)
+    (RECORDINGS_DATA_DIR / f"{rec_id}.feedback.json").unlink(missing_ok=True)
 
     out_dir = OUTPUTS_DIR / item["output_dir_name"]
     if out_dir.exists() and item["output_dir_name"] != "test":
@@ -935,7 +1082,7 @@ def serve_teacher_video(filename: str):
 @app.get("/recordings/{filename}")
 def serve_recording_file(filename: str):
     path = RECORDINGS_DATA_DIR / filename
-    if not path.is_file():
+    if path.suffix.lower() not in {".mp4", ".webm"} or not path.is_file():
         raise HTTPException(status_code=404, detail="Recording video not found")
     return FileResponse(path, media_type="video/mp4")
 
@@ -961,11 +1108,22 @@ def serve_dojo_environment():
     return FileResponse(path, media_type="model/gltf-binary")
 
 
-app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+if PRODUCT_DIST is None:
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+else:
+    app.mount("/assets", StaticFiles(directory=PRODUCT_DIST / "assets"), name="product-assets")
+    app.mount("/media", StaticFiles(directory=PRODUCT_DIST / "media"), name="product-media")
+
+    @app.get("/training", include_in_schema=False)
+    @app.get("/analysis", include_in_schema=False)
+    def serve_product():
+        return FileResponse(PRODUCT_DIST / "index.html", media_type="text/html")
 
 
 @app.get("/", response_class=HTMLResponse)
 def serve_ui():
+    if PRODUCT_DIST is not None:
+        return serve_product()
     index_file = STATIC_DIR / "index.html"
     if not index_file.is_file():
         return HTMLResponse("<h1>UI file not found.</h1>", status_code=500)

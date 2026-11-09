@@ -1,0 +1,34 @@
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: motionlearn:demo
+    restart: unless-stopped
+    init: true
+    ports:
+      - '127.0.0.1:8000:8000'
+    environment:
+      MOTIONLEARN_ORIGIN: https://${MOTIONLEARN_HOST:?Set MOTIONLEARN_HOST}
+    volumes:
+      - type: bind
+        source: ${MOTIONLEARN_DATA_PATH:-/srv/motionlearn-data/library}
+        target: /data
+        bind:
+          create_host_path: false
+  caddy:
+    image: caddy:2.10
+    restart: unless-stopped
+    network_mode: host
+    depends_on:
+      - app
+    environment:
+      MOTIONLEARN_HOST: ${MOTIONLEARN_HOST:?Set MOTIONLEARN_HOST}
+      MOTIONLEARN_PASSWORD_HASH: ${MOTIONLEARN_PASSWORD_HASH:?Set MOTIONLEARN_PASSWORD_HASH}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+volumes:
+  caddy_data:
+  caddy_config:

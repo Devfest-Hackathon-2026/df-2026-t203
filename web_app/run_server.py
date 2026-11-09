@@ -17,5 +17,5 @@ if __name__ == "__main__":
     print(f"  Ninjoucon Motion Capture Studio Web App")
     print(f"  Open in your browser: http://localhost:{port}")
     print(f"==================================================")
-    uvicorn.run("app:app", host="0.0.0.0", port=port, reload=False)
+    uvicorn.run("app:app", host="0.0.0.0", port=port, reload=False, workers=1, ws_max_size=512 * 1024)
 

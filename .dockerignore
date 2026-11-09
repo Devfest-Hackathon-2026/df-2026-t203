@@ -1,0 +1,27 @@
+**
+!final-web-app/
+!final-web-app/**
+final-web-app/node_modules/
+final-web-app/dist/
+final-web-app/tsconfig.tsbuildinfo
+final-web-app/public/media/hero-video.mp4
+!web_app/
+!web_app/**
+web_app/recordings_data/
+web_app/teacher_videos/*
+!web_app/teacher_videos/videos.json
+!web_app/teacher_videos/vid_sample.mp4
+!web_app/teacher_videos/vid_sample_keyposes/
+!web_app/teacher_videos/vid_sample_keyposes/**
+!utilities/
+!utilities/**
+!Motion_Capture/
+!Motion_Capture/**
+Motion_Capture/output/
+!deploy/
+!deploy/requirements.txt
+!pose_landmarker_full.task
+!Y Bot.fbx
+!Dojo.glb
+**/__pycache__/
+**/.env*
