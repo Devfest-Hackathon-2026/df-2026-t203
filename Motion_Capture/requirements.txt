@@ -1,0 +1,24 @@
+# Stage 1 (extract_landmarks.py) needs a Python 3.11 environment - mediapipe 0.10.9
+# has no wheel for the 3.14 interpreter in the repo default .venv, which is why this
+# repo keeps a separate .venv311:
+#
+#     py -3.11 -m venv .venv311
+#     .venv311/Scripts/python.exe -m pip install -r src/avatar/new-pipeline-mocap/requirements.txt
+mediapipe==0.10.9
+opencv-python
+numpy==1.23.5
+
+# Stage 2 (postprocess_landmarks.py) needs freemocap's post-processing library instead.
+# It is not on PyPI, and it does not have to share an environment with mediapipe - it is
+# installed in the repo default .venv:
+#
+#     .venv/Scripts/python.exe -m pip install "skellyforge @ git+https://github.com/freemocap/skellyforge@main"
+#
+# Stage 2.5 (stabilize_hands.py, and the debug_overlay.py / measure_stabilization.py tools
+# beside it) needs only numpy, PyYAML and cv2, all of which the repo default .venv already
+# has. It deliberately shares no dependency with mediapipe or skellyforge, so it can be
+# run and re-tuned on its own without re-tracking a video:
+#
+#     .venv/Scripts/python.exe -m pip install numpy pyyaml opencv-python
+#
+# Stage 3 (blender_retarget.py) needs no packages at all - it runs inside Blender.

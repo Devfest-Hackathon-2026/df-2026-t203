@@ -1,0 +1,209 @@
+# Tuning for stage 2.5, the hand stabiliser (stabilize_hands.py / hand_stabilizer.py).
+#
+# Every number the stabiliser uses lives here. Nothing in the code carries a magic
+# constant, so tuning is editing this file and re-running with --skip-extract.
+#
+# The pipeline order these sections follow, per finger, per frame:
+#
+#   confidence -> hysteresis -> hold/extrapolate -> blend back -> clamp -> one euro
+#
+# Angle sign conventions, which you need in order to read the limits below. Angles
+# are measured in an anatomical frame built on the palm each frame:
+#
+#   Ya  along the fingers   (wrist -> middle-finger knuckle)
+#   Za  out through the back of the hand (dorsal)
+#   Xa  Ya x Za, completing a right-handed frame
+#
+#   flexion    positive = curling towards the palm. 0 = the segment is in line with
+#              the one before it (for PIP/DIP) or with the palm (for MCP). This
+#              matches the clinical convention, where 0 degrees is a straight finger.
+#   abduction  positive = spreading towards the thumb side (radial). Reported and
+#              clamped anatomically, so one set of limits covers both hands even
+#              though the underlying frame is mirrored.
+
+
+# ---------------------------------------------------------------------------
+# 1. Confidence
+# ---------------------------------------------------------------------------
+# MediaPipe's hand solution reports visibility and presence as exactly 0.0 on
+# every landmark - there is no confidence score to read, so it is derived here
+# from four measurable signals. Each is mapped to 0..1, where 1 means good, then
+# combined with the weights below.
+confidence:
+  # IMPORTANT when re-tuning: the weights that are *not* rigidity must sum to
+  # less than `threshold` below. Otherwise a frame whose geometry is completely
+  # impossible still passes, as long as the hand is in shot and the classifier
+  # is sure - which is exactly the case this stage exists to catch. As shipped
+  # they sum to 0.40 against a threshold of 0.50.
+  weights:
+    # Bone lengths do not change. Segment length drifting from that hand's own
+    # median is direct evidence the solver fitted noisy 2D data to impossible 3D,
+    # which is the failure this whole stage exists for. Weighted so that it can
+    # condemn a frame on its own.
+    rigidity: 0.60
+    # Landmarks outside the picture are extrapolated by MediaPipe, not seen.
+    out_of_frame: 0.22
+    # A palm edge-on to the camera has almost no depth information, so finger
+    # positions along the view axis are guesses. Measured on Water.mp4 this
+    # separated well on the right hand and barely at all on the left, which is
+    # why it is a contributing term rather than a gate.
+    palm_facing: 0.13
+    # MediaPipe's own handedness score. It scores *which hand*, not tracking
+    # quality, so it is only a weak proxy - but it does collapse towards 0.5
+    # exactly where the hands overlap and tracking is worst.
+    handedness: 0.05
+
+  # Each raw signal is mapped to a 0..1 score by these scale points.
+  scales:
+    # Length-weighted median |relative deviation| of the 20 segments from their
+    # clip median. Score falls linearly from 1.0 at `rigidity_good` to 0.0 at
+    # `rigidity_bad`. Measured on Water.mp4 the per-detection value was
+    # median 9.6%, p90 37.7%, max 85.1%, so 0.35 sits near the p90.
+    rigidity_good: 0.08
+    rigidity_bad: 0.35
+    # Fraction of the 21 landmarks outside the image. Stage 1 already rejects a
+    # detection outright above --max-out-of-frame (0.30); this grades what is left.
+    out_of_frame_good: 0.05
+    out_of_frame_bad: 0.30
+    # |palm normal . camera axis|: 1.0 is palm square to the camera, 0.0 edge-on.
+    palm_facing_good: 0.45
+    palm_facing_bad: 0.10
+    # Handedness classifier score: 0.5 is a coin toss, 1.0 is certain.
+    handedness_good: 0.90
+    handedness_bad: 0.55
+
+  # Below this combined score a finger is "unreliable" and the hysteresis counters
+  # start running. Raise it to hold more often and trust live data less.
+  threshold: 0.50
+
+
+# ---------------------------------------------------------------------------
+# 2. Hysteresis
+# ---------------------------------------------------------------------------
+# Never switch state on a single frame. These are frame counts, not seconds,
+# because they exist to reject single-frame detector noise.
+hysteresis:
+  # Consecutive low-confidence frames before a finger enters hold.
+  frames_to_hold: 3
+  # Consecutive good-confidence frames before live data is trusted again.
+  # Higher than frames_to_hold on purpose: recovering too eagerly re-introduces
+  # exactly the flicker the hold was there to remove.
+  frames_to_release: 4
+
+
+# ---------------------------------------------------------------------------
+# 3. Hold, extrapolate, decay
+# ---------------------------------------------------------------------------
+# While a finger is held its joint angles are frozen or dead-reckoned, but the
+# palm orientation stays live, so the fingers ride the tracked wrist. That is
+# the whole point: a held finger moves with the hand, it just stops articulating.
+hold:
+  # Angular velocity is averaged over this many good frames before the hold, so
+  # a single noisy frame cannot launch the extrapolation.
+  velocity_window_frames: 4
+  # Ignore velocities above this. A "velocity" larger than any real finger is a
+  # symptom of the bad tracking we are holding *because of*, and extrapolating
+  # it throws the finger across its whole range in a few frames.
+  max_velocity_deg_per_second: 400.0
+  # Dead-reckon forward for this long. Beyond it, extrapolation stops gaining and
+  # the decay below takes over. ~200 ms is about the longest a finger keeps doing
+  # what it was doing without a course correction.
+  extrapolate_seconds: 0.20
+  # Time constant of the exponential decay from the extrapolated pose towards
+  # `neutral_pose`. After ~3x this the finger is essentially at neutral.
+  decay_seconds: 0.35
+  # A relaxed, slightly-curled hand: where a long occlusion ends up rather than
+  # drifting somewhere anatomically absurd. Degrees.
+  neutral_pose:
+    mcp_flexion: 20.0
+    mcp_abduction: 0.0
+    pip_flexion: 35.0
+    dip_flexion: 15.0
+    thumb_cmc_flexion: 25.0
+    thumb_cmc_abduction: -35.0
+    thumb_mcp_flexion: 10.0
+    thumb_ip_flexion: 10.0
+
+
+# ---------------------------------------------------------------------------
+# 4. Blend back
+# ---------------------------------------------------------------------------
+blend:
+  # Frames spent easing from the held pose to the live one once tracking is
+  # trusted again. The real hand has usually moved while it was occluded, so
+  # snapping straight to live data pops.
+  frames: 8
+  # smoothstep eases in and out; linear is a constant-rate crossfade.
+  easing: smoothstep
+
+
+# ---------------------------------------------------------------------------
+# 5. Anatomical joint limits
+# ---------------------------------------------------------------------------
+# UNVERIFIED. These are textbook clinical range-of-motion figures for a typical
+# adult hand, not measurements of the signer in any clip in this repository, and
+# no reviewer has checked them. They are a plausible envelope for rejecting
+# impossible poses, not a claim about anyone's hand. Narrow them if the avatar
+# still bends in ways the signer does not; widen them if real signs get clipped.
+#
+# Applied on EVERY frame, not just during a hold, because most of the unnatural
+# bending comes from the solver fitting noisy 2D data, which happens while
+# tracking is nominally fine.
+#
+# [min, max] in degrees. Negative flexion is hyperextension.
+# MCP flexion maxima were raised from a flat 90 after measuring closed fists on
+# Evacuation.mp4 and Scared.mp4: fist frames sat at a median of 74-86 degrees with
+# a p95 of 91-99, so a 90 ceiling clipped a genuine fist on 23-27% of them. The
+# values now follow the real ulnar gradient - the little finger flexes furthest -
+# and stay inside the range clinical sources report.
+joint_limits:
+  index:   {mcp_flexion: [-30,  95], mcp_abduction: [-25,  25], pip_flexion: [-5, 110], dip_flexion: [-10, 90]}
+  middle:  {mcp_flexion: [-30,  95], mcp_abduction: [-15,  15], pip_flexion: [-5, 110], dip_flexion: [-10, 90]}
+  ring:    {mcp_flexion: [-30, 100], mcp_abduction: [-20,  20], pip_flexion: [-5, 110], dip_flexion: [-10, 90]}
+  pinky:   {mcp_flexion: [-30, 100], mcp_abduction: [-30,  30], pip_flexion: [-5, 110], dip_flexion: [-10, 90]}
+  # The thumb's two proximal angles are NOT clinical CMC values. Clinical CMC
+  # flexion/abduction is measured against the thumb's own metacarpal neutral;
+  # these are measured in the palm frame like every other angle, so they describe
+  # the cone the thumb metacarpal sweeps relative to the middle-finger axis. The
+  # MCP and IP angles below *are* ordinary between-segment hinge angles and do
+  # carry their clinical meaning.
+  thumb:   {mcp_flexion: [-20,  75], mcp_abduction: [-75,   5], pip_flexion: [-10, 60], dip_flexion: [-15, 85]}
+
+
+# ---------------------------------------------------------------------------
+# 6. One Euro filter
+# ---------------------------------------------------------------------------
+# Final cleanup, on the joint angles, after everything above. Adaptive: heavy
+# smoothing when a joint is nearly still, light smoothing when it moves fast, so
+# it takes out jitter without adding lag to a fast sign.
+#
+# Tuning, in order: set beta to 0 and lower min_cutoff until a still hand stops
+# shivering; then raise beta until fast motion stops lagging.
+one_euro:
+  enabled: true
+  # Cutoff in Hz at zero speed. Lower = smoother when still.
+  min_cutoff: 1.5
+  # Speed coefficient. Higher = less lag during fast motion.
+  beta: 0.02
+  # Cutoff of the filter applied to the derivative itself.
+  derivative_cutoff: 1.0
+
+
+# ---------------------------------------------------------------------------
+# Reconstruction
+# ---------------------------------------------------------------------------
+reconstruct:
+  # Rebuild the 21 landmarks by forward kinematics from the clamped angles, using
+  # each hand's median bone lengths and median palm shape. This is what makes the
+  # joint limits bite: clamping an angle only matters if the positions are then
+  # rebuilt from it.
+  #
+  # It also makes bone lengths exactly constant, so the rigidity residual of the
+  # output is ~0 BY CONSTRUCTION. That is a property of the reconstruction, not
+  # evidence that tracking improved - judge the result on the angle statistics
+  # and the debug overlay, not on the residual.
+  enabled: true
+  # Bone lengths and palm shape are taken as the median over frames whose
+  # confidence is at least this. Falls back to all frames if too few qualify.
+  geometry_from_confidence: 0.60
+  min_geometry_frames: 10
