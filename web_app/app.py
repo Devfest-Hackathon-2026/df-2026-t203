@@ -34,7 +34,7 @@ if str(WORKSPACE_DIR) not in sys.path:
 if str(WEB_APP_DIR) not in sys.path:
     sys.path.insert(0, str(WEB_APP_DIR))
 
-from training_session import run_web_training_session  # noqa: E402
+from training_session import build_keypose_sync_for_recording, run_web_training_session  # noqa: E402
 
 RECORDINGS_DATA_DIR = WEB_APP_DIR / "recordings_data"
 TEACHER_VIDEOS_DIR = WEB_APP_DIR / "teacher_videos"
@@ -43,6 +43,7 @@ MOTION_CAPTURE_DIR = WORKSPACE_DIR / "Motion_Capture"
 PIPELINE_SCRIPT = MOTION_CAPTURE_DIR / "run_pipeline.py"
 OUTPUTS_DIR = MOTION_CAPTURE_DIR / "output"
 PYTHON_EXE = WORKSPACE_DIR / "venv" / "Scripts" / "python.exe"
+DOJO_GLB_PATH = WORKSPACE_DIR / "Dojo.glb"
 
 RECORDINGS_DATA_DIR.mkdir(parents=True, exist_ok=True)
 TEACHER_VIDEOS_DIR.mkdir(parents=True, exist_ok=True)
@@ -60,6 +61,17 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def disable_static_and_api_cache(request, call_next):
+    response = await call_next(request)
+    path = request.url.path
+    if path == "/" or path.startswith("/static/") or path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
 
 # In-memory logs and active process tracking
 active_logs: Dict[str, List[str]] = {}
@@ -232,7 +244,19 @@ def load_recordings_locked() -> List[Dict[str, Any]]:
             if not vid_id or (vid_id != "misc_mocap" and not videos_by_id.get(vid_id, {}).get("is_processed", False)):
                 item["video_id"] = "misc_mocap"
                 item["video_name"] = "Test Motion Capture (Misc.)"
+                item["teacher_video_filename"] = None
                 changed = True
+            elif vid_id != "misc_mocap":
+                parent_vid = videos_by_id.get(vid_id)
+                if parent_vid:
+                    if item.get("teacher_video_filename") != parent_vid.get("filename"):
+                        item["teacher_video_filename"] = parent_vid.get("filename")
+                        changed = True
+                    if not item.get("keypose_sync") and parent_vid.get("keyposes_dir"):
+                        rec_file = RECORDINGS_DATA_DIR / item.get("filename", "")
+                        kp_dir = TEACHER_VIDEOS_DIR / parent_vid["keyposes_dir"]
+                        item["keypose_sync"] = build_keypose_sync_for_recording(rec_file, kp_dir)
+                        changed = True
         if changed:
             renumber_recordings_locked(items)
             METADATA_FILE.write_text(json.dumps(items, indent=2), encoding="utf-8")
@@ -295,7 +319,14 @@ def update_recording(rec_id: str, updates: Dict[str, Any]) -> Dict[str, Any] | N
         return updated_item
 
 
-def register_new_recording(video_id: str, video_name: str, final_path: Path, rec_id: str, formatted_date: str) -> Dict[str, Any]:
+def register_new_recording(
+    video_id: str,
+    video_name: str,
+    final_path: Path,
+    rec_id: str,
+    formatted_date: str,
+    keypose_sync: List[Dict[str, Any]] | None = None,
+) -> Dict[str, Any]:
     with metadata_lock:
         items = load_recordings_locked()
         new_item = {
@@ -312,6 +343,7 @@ def register_new_recording(video_id: str, video_name: str, final_path: Path, rec
             "glb_filename": None,
             "blend_filename": None,
             "fbx_filename": None,
+            "keypose_sync": keypose_sync or [],
         }
         items.insert(0, new_item)
         renumber_recordings_locked(items)
@@ -422,6 +454,15 @@ def run_pipeline_worker(rec_id: str, video_path: Path, output_dir: Path) -> None
             blend_name = blend_files[0].name if blend_files else None
             fbx_name = fbx_files[0].name if fbx_files else None
 
+            rec_item = get_recording_by_id(rec_id) or {}
+            keypose_sync = rec_item.get("keypose_sync") or []
+            vid_id = rec_item.get("video_id")
+            if vid_id and vid_id != "misc_mocap" and not keypose_sync:
+                parent_vid = get_video_by_id(vid_id)
+                if parent_vid and parent_vid.get("keyposes_dir"):
+                    kp_dir = TEACHER_VIDEOS_DIR / parent_vid["keyposes_dir"]
+                    keypose_sync = build_keypose_sync_for_recording(video_path, kp_dir)
+
             active_stages[rec_id] = "Completed"
             active_logs[rec_id].append(f"[success] Pipeline finished! Generated {glb_name}")
 
@@ -431,6 +472,7 @@ def run_pipeline_worker(rec_id: str, video_path: Path, output_dir: Path) -> None
                 "glb_filename": glb_name,
                 "blend_filename": blend_name,
                 "fbx_filename": fbx_name,
+                "keypose_sync": keypose_sync,
             })
         else:
             err = f"Pipeline exited with code {process.returncode} (glb created: {has_glb})"
@@ -699,13 +741,14 @@ async def training_websocket(websocket: WebSocket, video_id: str):
     raw_recording_path = RECORDINGS_DATA_DIR / f"{rec_id}_raw.mp4"
     final_recording_path = RECORDINGS_DATA_DIR / f"{rec_id}.mp4"
 
-    def on_saved(final_path: Path) -> Dict[str, Any]:
+    def on_saved(final_path: Path, keypose_sync: List[Dict[str, Any]] | None = None) -> Dict[str, Any]:
         return register_new_recording(
             video_id=video["id"],
             video_name=video["name"],
             final_path=final_path,
             rec_id=rec_id,
             formatted_date=formatted_date,
+            keypose_sync=keypose_sync,
         )
 
     try:
@@ -852,6 +895,32 @@ def delete_recording(rec_id: str):
     return {"deleted": True, "id": rec_id, "recordings": items}
 
 
+@app.get("/api/recordings/{rec_id}/side_video")
+def serve_recording_side_video(rec_id: str):
+    """Serve the side-by-side companion video for a processed motion capture recording.
+
+    For any recording belonging to an uploaded teacher video (`video_id != 'misc_mocap'`),
+    this ALWAYS returns the uploaded teacher video (`TEACHER_VIDEOS_DIR / parent_vid['filename']`),
+    never the user's webcam recording.
+    """
+    rec = get_recording_by_id(rec_id)
+    if not rec:
+        raise HTTPException(status_code=404, detail="Recording not found")
+
+    vid_id = rec.get("video_id")
+    if vid_id and vid_id != "misc_mocap":
+        parent_vid = get_video_by_id(vid_id)
+        if parent_vid and parent_vid.get("filename"):
+            teacher_path = TEACHER_VIDEOS_DIR / parent_vid["filename"]
+            if teacher_path.is_file():
+                return FileResponse(teacher_path, media_type="video/mp4")
+
+    rec_path = RECORDINGS_DATA_DIR / rec["filename"]
+    if not rec_path.is_file():
+        raise HTTPException(status_code=404, detail="Companion video not found")
+    return FileResponse(rec_path, media_type="video/mp4")
+
+
 # ---------------------------------------------------------------------------
 # Static & Media File Serving
 # ---------------------------------------------------------------------------
@@ -878,6 +947,18 @@ def serve_output_file(output_dir: str, filename: str):
         raise HTTPException(status_code=404, detail="Output file not found")
     media_type = "model/gltf-binary" if filename.endswith(".glb") else "application/octet-stream"
     return FileResponse(path, media_type=media_type)
+
+
+@app.get("/environment/dojo.glb")
+def serve_dojo_environment():
+    path = DOJO_GLB_PATH
+    if not path.is_file():
+        alt = WORKSPACE_DIR / "dojo.glb"
+        if alt.is_file():
+            path = alt
+        else:
+            raise HTTPException(status_code=404, detail="Dojo.glb not found in workspace root")
+    return FileResponse(path, media_type="model/gltf-binary")
 
 
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")

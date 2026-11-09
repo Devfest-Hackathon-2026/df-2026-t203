@@ -142,6 +142,180 @@ def finalize_clean_video(raw_path: Path, final_path: Path) -> bool:
         return final_path.exists()
 
 
+def build_keypose_sync_for_recording(
+    video_path: Path,
+    keyposes_dir: Path,
+    recorded_sync: Dict[int, Dict[str, float]] | list[Dict[str, Any]] | None = None,
+) -> list[Dict[str, Any]]:
+    """Build a complete per-keypose synchronization table mapping mocap time to teacher video time.
+
+    Each returned item has:
+      - pose_id: int (0 .. K-1)
+      - teacher_time: float (timestamp of keypose in uploaded teacher video)
+      - mocap_arrive_time: float (mocap time when teacher video arrives & pauses at teacher_time)
+      - mocap_match_time: float (mocap time when user in recorded mocap matches the keypose)
+      - next_teacher_time: float (timestamp of next keypose in teacher video)
+      - next_mocap_arrive_time: float (mocap time when teacher video arrives at next_teacher_time)
+    """
+    timestamps_file = keyposes_dir / "teacher_timestamps.json"
+    keyposes_file = keyposes_dir / "teacher_keyposes.json"
+    if not timestamps_file.exists():
+        return []
+
+    try:
+        raw_timestamps = json.loads(timestamps_file.read_text(encoding="utf-8"))
+        timestamps = {int(k): float(v) for k, v in raw_timestamps.items()}
+    except Exception:
+        return []
+
+    sorted_ids = sorted(timestamps.keys())
+    total_poses = len(sorted_ids)
+    if total_poses == 0:
+        return []
+
+    mocap_duration = 15.0
+    fps = 30.0
+    total_frames = 0
+    if video_path and video_path.exists():
+        cap = cv2.VideoCapture(str(video_path))
+        if cap.isOpened():
+            fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+            if total_frames > 0 and fps > 0:
+                mocap_duration = max(1.0, total_frames / fps)
+        cap.release()
+
+    # Normalize recorded_sync into a dict keyed by int pose_id
+    sync_by_id: Dict[int, Dict[str, Any]] = {}
+    if isinstance(recorded_sync, dict):
+        for k, v in recorded_sync.items():
+            try:
+                sync_by_id[int(k)] = dict(v)
+            except Exception:
+                pass
+    elif isinstance(recorded_sync, list):
+        for item in recorded_sync:
+            if isinstance(item, dict) and "pose_id" in item:
+                sync_by_id[int(item["pose_id"])] = dict(item)
+
+    # Check if recorded_sync has keyposes recorded during the live session
+    recorded_pids = [
+        pid
+        for pid in sorted_ids
+        if pid in sync_by_id
+        and sync_by_id[pid].get("mocap_arrive_time") is not None
+        and sync_by_id[pid].get("mocap_match_time") is not None
+    ]
+
+    if len(recorded_pids) == total_poses:
+        result: list[Dict[str, Any]] = []
+        for idx, pid in enumerate(sorted_ids):
+            entry = sync_by_id[pid]
+            t_teacher = timestamps[pid]
+            next_t_teacher = timestamps[sorted_ids[idx + 1]] if (idx + 1) < total_poses else t_teacher
+            arrive_t = float(entry["mocap_arrive_time"])
+            match_t = max(arrive_t + 0.1, float(entry["mocap_match_time"]))
+            if (idx + 1) < total_poses:
+                next_arrive_t = float(sync_by_id[sorted_ids[idx + 1]]["mocap_arrive_time"])
+            else:
+                next_arrive_t = max(match_t + 0.1, mocap_duration)
+            result.append({
+                "pose_id": pid,
+                "teacher_time": round(t_teacher, 4),
+                "mocap_arrive_time": round(arrive_t, 4),
+                "mocap_match_time": round(min(match_t, next_arrive_t), 4),
+                "next_teacher_time": round(next_t_teacher, 4),
+                "next_mocap_arrive_time": round(next_arrive_t, 4),
+            })
+        return result
+
+    # Otherwise, partition mocap_duration across all keyposes and detect best pose match per segment
+    samples: list[tuple[float, dict | None]] = []
+    target_angles_db: Dict[int, dict] = {}
+    pipeline = None
+
+    if keyposes_file.exists() and video_path and video_path.exists() and total_frames > 0:
+        try:
+            stored_poses = json.loads(keyposes_file.read_text(encoding="utf-8"))
+            pipeline = MedaiPipeline(enable_ble=False, ema_alpha=0.65)
+            for pid in sorted_ids:
+                k_str = str(pid)
+                if k_str in stored_poses:
+                    angles, _ = pipeline.human_analysis(stored_poses[k_str])
+                    target_angles_db[pid] = angles
+
+            cap = cv2.VideoCapture(str(video_path))
+            step = max(1, int(round(fps / 6.0)))  # ~6 samples/sec for fast analysis
+            f_idx = 0
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                if f_idx % step == 0:
+                    _, _, _, sw = pipeline.mark_frame(frame, draw_landmarks=False)
+                    s_angles = pipeline.human_analysis(sw)[0] if sw is not None else None
+                    samples.append((f_idx / fps, s_angles))
+                f_idx += 1
+            cap.release()
+        except Exception as exc:
+            print(f"[keypose_sync] Pose analysis fallback warning: {exc}")
+
+    # Weight each keypose segment by its teacher transition + hold allowance
+    weights: list[float] = []
+    for idx, pid in enumerate(sorted_ids):
+        t_cur = timestamps[pid]
+        t_nxt = timestamps[sorted_ids[idx + 1]] if (idx + 1) < total_poses else t_cur
+        trans = max(0.0, t_nxt - t_cur)
+        weights.append(1.5 + trans)
+    total_weight = sum(weights) or float(total_poses)
+
+    result = []
+    cursor = 0.0
+    for idx, pid in enumerate(sorted_ids):
+        seg_dur = mocap_duration * (weights[idx] / total_weight)
+        arrive_t = cursor
+        next_arrive_t = mocap_duration if (idx + 1) == total_poses else (cursor + seg_dur)
+        t_teacher = timestamps[pid]
+        next_t_teacher = timestamps[sorted_ids[idx + 1]] if (idx + 1) < total_poses else t_teacher
+
+        # Default match time leaves time to hold pose and time to play transition to next keypose
+        teacher_trans = max(0.0, next_t_teacher - t_teacher)
+        play_window = min(seg_dur * 0.45, teacher_trans) if (idx + 1) < total_poses else (seg_dur * 0.15)
+        default_match_t = max(arrive_t + seg_dur * 0.25, next_arrive_t - max(0.25, play_window))
+
+        best_match_t = default_match_t
+        if samples and pipeline and pid in target_angles_db:
+            t_angles = target_angles_db[pid]
+            search_start = arrive_t + seg_dur * 0.15
+            search_end = next_arrive_t - max(0.2, play_window * 0.5)
+            if search_end <= search_start:
+                search_end = arrive_t + seg_dur * 0.75
+            best_err = 9999.0
+            for t_s, s_angles in samples:
+                if search_start <= t_s <= search_end and s_angles is not None:
+                    compared = sum(
+                        1 for j, tv in t_angles.items() if tv is not None and s_angles.get(j) is not None
+                    )
+                    if compared >= 3:
+                        err, _ = calculate_pose_match_score(t_angles, s_angles, pipeline.joint_weights)
+                        if err is not None and err < best_err:
+                            best_err = err
+                            best_match_t = t_s
+
+        result.append({
+            "pose_id": pid,
+            "teacher_time": round(t_teacher, 4),
+            "mocap_arrive_time": round(arrive_t, 4),
+            "mocap_match_time": round(best_match_t, 4),
+            "next_teacher_time": round(next_t_teacher, 4),
+            "next_mocap_arrive_time": round(next_arrive_t, 4),
+        })
+        cursor = next_arrive_t
+
+    return result
+
+
+
 async def run_web_training_session(
     websocket,
     video_info: Dict[str, Any],
@@ -236,6 +410,8 @@ async def run_web_training_session(
     state = "PAUSED"
 
     session_record = {}
+    recorded_keypose_sync: Dict[int, Dict[str, float]] = {}
+    current_pose_arrive_frame = 0
     student_transition_poses = []
     last_dtw_score = None
     match_hold_frames = 0
@@ -243,6 +419,14 @@ async def run_web_training_session(
     last_overlay_frame_sent = 0.0
     checkpoint_waiting_paused = False
     should_stop = False
+
+    def record_pose_match(matched_pose_id: int) -> None:
+        recorded_keypose_sync[matched_pose_id] = {
+            "pose_id": matched_pose_id,
+            "teacher_time": float(timestamps.get(str(matched_pose_id), 0.0)),
+            "mocap_arrive_time": round(current_pose_arrive_frame / fps, 4),
+            "mocap_match_time": round(frames_written / fps, 4),
+        }
 
     try:
         while not should_stop:
@@ -264,6 +448,7 @@ async def run_web_training_session(
                         else:
                             last_dtw_score = None
                         student_transition_poses = []
+                        current_pose_arrive_frame = frames_written
                         state = "PAUSED"
                     elif msg_type == "SKIP_POSE" and state == "PAUSED":
                         next_timestamp = timestamps.get(str(pose_id + 1))
@@ -273,6 +458,7 @@ async def run_web_training_session(
                             match_hold_frames = 0
                             score_ema = None
                         elif next_timestamp is not None:
+                            record_pose_match(pose_id)
                             await websocket.send_json({"action": "play_until", "target_time": next_timestamp})
                             state = "PLAYING"
                             pose_id += 1
@@ -281,12 +467,14 @@ async def run_web_training_session(
                             match_hold_frames = 0
                             score_ema = None
                         else:
+                            record_pose_match(pose_id)
                             should_stop = True
                             break
                     elif msg_type == "CHECKPOINT_ACTION" and state == "CHECKPOINT":
                         ui_action = data.get("action")
                         if ui_action == "Thumb_Up":
                             next_timestamp = timestamps.get(str(pose_id + 1))
+                            record_pose_match(pose_id)
                             if next_timestamp is not None:
                                 await websocket.send_json({"action": "play_until", "target_time": next_timestamp})
                                 state = "PLAYING"
@@ -307,11 +495,13 @@ async def run_web_training_session(
                                 await websocket.send_json({"action": "pause"})
                                 current_target_pose = str(pose_id)
                                 timestamp = next_timestamp
+                                current_pose_arrive_frame = frames_written
                                 match_hold_frames = 0
                                 score_ema = None
                                 student_transition_poses = []
                                 replay_target = timestamps.get(str(pose_id + 1))
                                 if replay_target is not None:
+                                    record_pose_match(pose_id)
                                     await websocket.send_json({"action": "play_until", "target_time": replay_target})
                                     state = "PLAYING"
                                     checkpoint_waiting_paused = False
@@ -342,13 +532,12 @@ async def run_web_training_session(
             worst_joint_names = []
 
             if state in ("PAUSED", "CHECKPOINT"):
-                annotated_student, pose, world_pose, smoothed_world = pipeline.mark_frame(display_student)
+                _, pose, world_pose, smoothed_world = pipeline.mark_frame(display_student, draw_landmarks=False)
                 if hand_recognizer is not None:
                     try:
                         action = hand_recognizer.mark_frame(student_frame, int(time.time() * 1000))
                     except Exception:
                         action = None
-                display_student = annotated_student if pose else display_student
 
                 if world_pose is not None and smoothed_world is not None:
                     try:
@@ -442,6 +631,7 @@ async def run_web_training_session(
                                         score_ema = None
                                         action = None
                                     elif next_timestamp is not None:
+                                        record_pose_match(pose_id)
                                         await websocket.send_json({"action": "play_until", "target_time": next_timestamp})
                                         state = "PLAYING"
                                         pose_id += 1
@@ -451,6 +641,7 @@ async def run_web_training_session(
                                         score_ema = None
                                     else:
                                         # Reached final keypose!
+                                        record_pose_match(pose_id)
                                         should_stop = True
                                         break
                             else:
@@ -493,6 +684,7 @@ async def run_web_training_session(
 
                 if action == "Thumb_Up":
                     next_timestamp = timestamps.get(str(pose_id + 1))
+                    record_pose_match(pose_id)
                     if next_timestamp is not None:
                         await websocket.send_json({"action": "play_until", "target_time": next_timestamp})
                         state = "PLAYING"
@@ -514,12 +706,14 @@ async def run_web_training_session(
                         await websocket.send_json({"action": "pause"})
                         current_target_pose = str(pose_id)
                         timestamp = next_timestamp
+                        current_pose_arrive_frame = frames_written
                         match_hold_frames = 0
                         score_ema = None
                         student_transition_poses = []
                         action = None
                         replay_target = timestamps.get(str(pose_id + 1))
                         if replay_target is not None:
+                            record_pose_match(pose_id)
                             await websocket.send_json({"action": "play_until", "target_time": replay_target})
                             state = "PLAYING"
                             checkpoint_waiting_paused = False
@@ -531,8 +725,7 @@ async def run_web_training_session(
                             checkpoint_waiting_paused = False
 
             elif state == "PLAYING":
-                annotated_student, pose, world_pose, smoothed_world = pipeline.mark_frame(display_student)
-                display_student = annotated_student if pose else display_student
+                _, pose, world_pose, smoothed_world = pipeline.mark_frame(display_student, draw_landmarks=False)
                 if smoothed_world is not None:
                     student_transition_poses.append(pipeline.serialize_pose(smoothed_world))
                 cv2.putText(
@@ -575,7 +768,12 @@ async def run_web_training_session(
 
     # Finalize and register the clean user recording
     if frames_written > 5 and finalize_clean_video(raw_recording_path, final_recording_path):
-        new_rec = on_recording_saved(final_recording_path)
+        keypose_sync = build_keypose_sync_for_recording(
+            video_path=final_recording_path,
+            keyposes_dir=keyposes_dir,
+            recorded_sync=recorded_keypose_sync,
+        )
+        new_rec = on_recording_saved(final_recording_path, keypose_sync)
         try:
             await websocket.send_json({
                 "type": "SESSION_COMPLETE",
