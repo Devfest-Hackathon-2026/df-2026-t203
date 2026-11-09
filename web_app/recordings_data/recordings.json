@@ -1,1 +1,101 @@
-[]
+[
+  {
+    "id": "rec_20261109_233809",
+    "video_id": "vid_sample",
+    "video_name": "Sample Video (captured_vid)",
+    "recording_no": 1,
+    "title": "Recording #1 - Nov 09, 2026, 11:38 PM",
+    "created_at": "Nov 09, 2026, 11:38 PM",
+    "filename": "rec_20261109_233809.mp4",
+    "is_processed": true,
+    "status": "completed",
+    "output_dir_name": "rec_20261109_233809",
+    "glb_filename": "rec_20261109_233809_animated.glb",
+    "blend_filename": "rec_20261109_233809.blend",
+    "fbx_filename": "rec_20261109_233809_animated.fbx",
+    "keypose_sync": [
+      {
+        "pose_id": 0,
+        "teacher_time": 0.1,
+        "mocap_arrive_time": 0.0,
+        "mocap_match_time": 3.8333,
+        "next_teacher_time": 3.1667,
+        "next_mocap_arrive_time": 6.0017
+      },
+      {
+        "pose_id": 1,
+        "teacher_time": 3.1667,
+        "mocap_arrive_time": 6.0017,
+        "mocap_match_time": 7.6667,
+        "next_teacher_time": 4.3667,
+        "next_mocap_arrive_time": 9.5502
+      },
+      {
+        "pose_id": 2,
+        "teacher_time": 4.3667,
+        "mocap_arrive_time": 9.5502,
+        "mocap_match_time": 10.3333,
+        "next_teacher_time": 6.1,
+        "next_mocap_arrive_time": 13.7996
+      },
+      {
+        "pose_id": 3,
+        "teacher_time": 6.1,
+        "mocap_arrive_time": 13.7996,
+        "mocap_match_time": 16.5,
+        "next_teacher_time": 10.2333,
+        "next_mocap_arrive_time": 21.2032
+      },
+      {
+        "pose_id": 4,
+        "teacher_time": 10.2333,
+        "mocap_arrive_time": 21.2032,
+        "mocap_match_time": 23.7612,
+        "next_teacher_time": 12.1,
+        "next_mocap_arrive_time": 25.6279
+      },
+      {
+        "pose_id": 5,
+        "teacher_time": 12.1,
+        "mocap_arrive_time": 25.6279,
+        "mocap_match_time": 27.0,
+        "next_teacher_time": 13.3667,
+        "next_mocap_arrive_time": 29.264
+      },
+      {
+        "pose_id": 6,
+        "teacher_time": 13.3667,
+        "mocap_arrive_time": 29.264,
+        "mocap_match_time": 30.0,
+        "next_teacher_time": 14.3,
+        "next_mocap_arrive_time": 32.462
+      },
+      {
+        "pose_id": 7,
+        "teacher_time": 14.3,
+        "mocap_arrive_time": 32.462,
+        "mocap_match_time": 33.3333,
+        "next_teacher_time": 14.3,
+        "next_mocap_arrive_time": 34.4333
+      }
+    ],
+    "error_message": null,
+    "teacher_video_filename": "vid_sample.mp4"
+  },
+  {
+    "id": "rec_20261109_215332",
+    "video_id": "misc_mocap",
+    "video_name": "Test Motion Capture (Misc.)",
+    "recording_no": 1,
+    "title": "Recording #1 - Nov 09, 2026, 09:53 PM",
+    "created_at": "Nov 09, 2026, 09:53 PM",
+    "filename": "rec_20261109_215332.mp4",
+    "is_processed": true,
+    "status": "completed",
+    "output_dir_name": "rec_20261109_215332",
+    "glb_filename": "rec_20261109_215332_animated.glb",
+    "blend_filename": "rec_20261109_215332.blend",
+    "fbx_filename": "rec_20261109_215332_animated.fbx",
+    "error_message": null
+  }
+]

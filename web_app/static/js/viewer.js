@@ -29,12 +29,15 @@ export class AvatarViewer {
     this.mixer = null;
     this.activeAction = null;
     this.currentModel = null;
+    this.environmentModel = null;
+    this.gridHelper = null;
     this.animationClip = null;
 
     this.duration = 0;
     this.isPlaying = false;
     this.isLooping = true;
     this.playbackRate = 1.0;
+    this.keyframeBarrierTime = null;
 
     this.isSeeking = false;
     this.animationFrameId = null;
@@ -42,6 +45,7 @@ export class AvatarViewer {
     this.initScene();
     this.initLights();
     this.initFloor();
+    this.loadEnvironment(options.environmentUrl || '/environment/dojo.glb');
     this.animate = this.animate.bind(this);
     this.handleResize = this.handleResize.bind(this);
 
@@ -55,13 +59,13 @@ export class AvatarViewer {
 
   initScene() {
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(0x131722);
-    this.scene.fog = new THREE.FogExp2(0x131722, 0.04);
+    this.scene.background = new THREE.Color(0x1a1612);
+    this.scene.fog = new THREE.FogExp2(0x1a1612, 0.015);
 
     const width = this.container.clientWidth || 800;
     const height = this.container.clientHeight || 600;
 
-    this.camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 100);
+    this.camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 150);
     this.camera.position.set(0, 1.3, 3.2);
 
     this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
@@ -70,7 +74,7 @@ export class AvatarViewer {
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.1;
+    this.renderer.toneMappingExposure = 1.15;
 
     // Insert the canvas behind the overlay controls (camera presets, video PIP)
     const canvas = this.renderer.domElement;
@@ -82,53 +86,135 @@ export class AvatarViewer {
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.05;
     this.controls.target.set(0, 1.0, 0);
-    this.controls.maxPolarAngle = Math.PI / 2 + 0.05; // Don't go below floor
+    this.controls.maxPolarAngle = Math.PI / 2 - 0.02; // Keep camera above the dojo wooden floor
     this.controls.minDistance = 0.8;
-    this.controls.maxDistance = 15;
+    this.controls.maxDistance = 12.0; // Keep camera inside the dojo walls
     this.controls.update();
   }
 
   initLights() {
-    // Ambient light
-    const ambient = new THREE.AmbientLight(0xffffff, 0.8);
+    // Warm interior hemisphere & ambient light for the dojo
+    const hemiLight = new THREE.HemisphereLight(0xfff4e0, 0x4a3525, 1.1);
+    hemiLight.position.set(0, 4.5, 0);
+    this.scene.add(hemiLight);
+
+    const ambient = new THREE.AmbientLight(0xffeedd, 0.6);
     this.scene.add(ambient);
 
-    // Main key light
-    const keyLight = new THREE.DirectionalLight(0xffffff, 1.4);
-    keyLight.position.set(3, 5, 3);
+    // Main key light positioned inside the dojo below ceiling height
+    const keyLight = new THREE.DirectionalLight(0xfff7e8, 1.6);
+    keyLight.position.set(2.5, 4.2, 3.5);
     keyLight.castShadow = true;
-    keyLight.shadow.mapSize.width = 1024;
-    keyLight.shadow.mapSize.height = 1024;
+    keyLight.shadow.mapSize.width = 2048;
+    keyLight.shadow.mapSize.height = 2048;
     keyLight.shadow.camera.near = 0.5;
     keyLight.shadow.camera.far = 15;
+    keyLight.shadow.camera.left = -4;
+    keyLight.shadow.camera.right = 4;
+    keyLight.shadow.camera.top = 4;
+    keyLight.shadow.camera.bottom = -4;
     keyLight.shadow.bias = -0.0005;
     this.scene.add(keyLight);
 
-    // Rim / Back light
-    const rimLight = new THREE.DirectionalLight(0x6366f1, 1.2);
-    rimLight.position.set(-3, 3, -3);
+    // Warm lantern / shrine back-rim light inside the dojo
+    const rimLight = new THREE.PointLight(0xffb366, 6.0, 22, 1.5);
+    rimLight.position.set(0, 3.2, -4.5);
     this.scene.add(rimLight);
 
-    // Fill light
-    const fillLight = new THREE.DirectionalLight(0x38bdf8, 0.5);
-    fillLight.position.set(0, -1, 3);
+    // Soft front/side fill light
+    const fillLight = new THREE.DirectionalLight(0xdbeafe, 0.5);
+    fillLight.position.set(-3, 2.5, 4);
     this.scene.add(fillLight);
   }
 
   initFloor() {
-    // Grid floor
-    const gridHelper = new THREE.GridHelper(10, 20, 0x6366f1, 0x2b3245);
-    gridHelper.position.y = 0;
-    this.scene.add(gridHelper);
+    // Fallback grid floor (hidden automatically once Dojo.glb loads)
+    this.gridHelper = new THREE.GridHelper(10, 20, 0x6366f1, 0x2b3245);
+    this.gridHelper.position.y = 0;
+    this.scene.add(this.gridHelper);
 
-    // Shadow receiver plane
+    // Subtle contact shadow receiver plane right at floor level (y = 0)
     const planeGeo = new THREE.PlaneGeometry(30, 30);
-    const planeMat = new THREE.ShadowMaterial({ opacity: 0.35 });
+    const planeMat = new THREE.ShadowMaterial({ opacity: 0.3 });
     const shadowPlane = new THREE.Mesh(planeGeo, planeMat);
     shadowPlane.rotation.x = -Math.PI / 2;
-    shadowPlane.position.y = -0.005;
+    shadowPlane.position.y = 0.002;
     shadowPlane.receiveShadow = true;
     this.scene.add(shadowPlane);
+  }
+
+  async loadEnvironment(url) {
+    if (!url) return null;
+    const loader = new GLTFLoader();
+    return new Promise((resolve) => {
+      loader.load(
+        url,
+        (gltf) => {
+          if (this.environmentModel) {
+            this.scene.remove(this.environmentModel);
+          }
+
+          const envScene = gltf.scene;
+
+          // Align the Dojo building so its interior wooden floor is at y = 0
+          // and the avatar at (0, 0, 0) stands centered in front of the main shrine wall.
+          const dojoB = envScene.getObjectByName('Dojo_B');
+          const dojoRoot = (dojoB && dojoB.parent) ? dojoB.parent : envScene.children[0];
+          if (dojoRoot) {
+            dojoRoot.position.set(-7.07, 1.104, 14.0);
+            dojoRoot.rotation.set(0, 0, 0);
+            dojoRoot.scale.set(1, 1, 1);
+          }
+
+          const embeddedLights = [];
+          envScene.traverse((child) => {
+            if (child.isLight) {
+              embeddedLights.push(child);
+              return;
+            }
+            const name = child.name || '';
+            if (
+              name.startsWith('CubeLight') ||
+              name.startsWith('CylinderLight') ||
+              name.startsWith('_Colliders')
+            ) {
+              child.visible = false;
+              return;
+            }
+            if (child.isMesh) {
+              child.receiveShadow = true;
+              // Allow interior props to cast shadows without the roof/ceiling blocking overhead light
+              const isStructure =
+                name.includes('Ceiling') ||
+                name.includes('Roof') ||
+                name.includes('Wall') ||
+                name.includes('Floor') ||
+                name.includes('Outside');
+              child.castShadow = !isStructure;
+            }
+          });
+
+          // Remove the 30 raw KHR_lights_punctual lights to prevent shader uniform bloat and overexposure
+          embeddedLights.forEach((light) => {
+            if (light.parent) light.parent.remove(light);
+          });
+
+          this.environmentModel = envScene;
+          this.scene.add(this.environmentModel);
+
+          if (this.gridHelper) {
+            this.gridHelper.visible = false;
+          }
+
+          resolve(gltf);
+        },
+        undefined,
+        (err) => {
+          console.warn('[viewer] Failed to load environment GLB:', err);
+          resolve(null);
+        }
+      );
+    });
   }
 
   handleResize() {
@@ -157,6 +243,7 @@ export class AvatarViewer {
         url,
         (gltf) => {
           this.currentModel = gltf.scene;
+          this.currentModel.scale.setScalar(1.75);
 
           // Enable shadows on all meshes
           this.currentModel.traverse((child) => {
@@ -279,22 +366,33 @@ export class AvatarViewer {
     }
   }
 
+  setKeyframeBarrier(targetTime) {
+    if (targetTime === null || targetTime === undefined || !Number.isFinite(targetTime)) {
+      this.keyframeBarrierTime = null;
+    } else {
+      this.keyframeBarrierTime = Math.max(0, Number(targetTime));
+    }
+  }
+
   setCameraPreset(preset) {
     if (!this.controls) return;
+    const s = 1.75;
+    const baseY = 0.9 * s;
+    this.controls.target.set(0, baseY, 0);
     const target = this.controls.target;
     switch (preset) {
       case 'front':
-        this.camera.position.set(target.x, target.y + 0.1, target.z + 3.0);
+        this.camera.position.set(target.x, target.y + 0.1 * s, target.z + 3.0 * s);
         break;
       case 'side':
-        this.camera.position.set(target.x + 3.0, target.y + 0.1, target.z);
+        this.camera.position.set(target.x + 3.0 * s, target.y + 0.1 * s, target.z);
         break;
       case 'perspective':
-        this.camera.position.set(target.x + 2.0, target.y + 0.8, target.z + 2.5);
+        this.camera.position.set(target.x + 2.0 * s, target.y + 0.8 * s, target.z + 2.5 * s);
         break;
       case 'upper':
-        this.camera.position.set(target.x, target.y + 0.3, target.z + 1.8);
-        this.controls.target.set(target.x, target.y + 0.4, target.z);
+        this.controls.target.set(0, (0.9 + 0.4) * s, 0);
+        this.camera.position.set(0, (0.9 + 0.3) * s, 1.8 * s);
         break;
     }
     this.controls.update();
@@ -305,9 +403,35 @@ export class AvatarViewer {
     const delta = this.clock.getDelta();
 
     if (this.mixer && this.isPlaying && !this.isSeeking) {
-      this.mixer.update(delta);
-      if (this.activeAction && this.duration > 0) {
-        this.options.onTimeUpdate(this.activeAction.time % this.duration, this.duration);
+      if (
+        this.activeAction &&
+        this.duration > 0 &&
+        this.keyframeBarrierTime !== null
+      ) {
+        const nextTime = this.activeAction.time + delta * this.playbackRate;
+        if (nextTime >= this.keyframeBarrierTime) {
+          const clampedBarrier = Math.max(
+            0,
+            Math.min(this.duration - 0.0005, this.keyframeBarrierTime)
+          );
+          this.activeAction.time = clampedBarrier;
+          this.mixer.update(0);
+          this.options.onTimeUpdate(this.keyframeBarrierTime, this.duration);
+        } else {
+          this.mixer.update(delta);
+          this.options.onTimeUpdate(
+            this.activeAction.time % this.duration,
+            this.duration
+          );
+        }
+      } else {
+        this.mixer.update(delta);
+        if (this.activeAction && this.duration > 0) {
+          this.options.onTimeUpdate(
+            this.activeAction.time % this.duration,
+            this.duration
+          );
+        }
       }
     }
 

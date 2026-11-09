@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Ninjoucon Motion Capture & Copy-Training Studio</title>
-  <link rel="stylesheet" href="/static/css/style.css" />
+  <link rel="stylesheet" href="/static/css/style.css?v=20261109_3" />
 
   <!-- Three.js Import Map -->
   <script type="importmap">
@@ -127,19 +127,25 @@
             <button id="btn-edit-checkpoint" class="ext-mini-btn" type="button">Edit Checkpoint</button>
           </div>
 
-          <!-- MotionLearn Webcam Overlay (from YouTube Extension Content.js) -->
-          <div id="motionlearn-webcam-overlay" class="webcam-overlay" style="display: none;">
+          <!-- MotionLearn Webcam Overlay (Translucent Overlay or Side-by-Side) -->
+          <div id="motionlearn-webcam-overlay" class="webcam-overlay expanded" style="display: none;">
             <div class="webcam-overlay-header">
-              <span class="webcam-overlay-label">Webcam Overlay</span>
-              <button id="btn-expand-overlay" class="webcam-expand-btn" type="button" title="Expand / collapse webcam overlay">⛶</button>
+              <span id="webcam-overlay-label" class="webcam-overlay-label">Translucent Webcam Overlay</span>
+              <div class="webcam-overlay-controls">
+                <label id="webcam-opacity-control" class="webcam-opacity-control" title="Adjust webcam overlay translucency">
+                  <span>Opacity</span>
+                  <input id="overlay-opacity-slider" type="range" min="0.15" max="0.90" step="0.05" value="0.45" />
+                </label>
+                <button id="btn-toggle-training-layout" class="webcam-expand-btn" type="button" title="Switch between Translucent Overlay and Side-by-Side">📐 Side by Side</button>
+                <button id="btn-expand-overlay" class="webcam-expand-btn" type="button" title="Toggle full-video overlay vs corner Picture-in-Picture">🗗 Corner PIP</button>
+              </div>
             </div>
             <img id="opencv-overlay-img" class="webcam-overlay-img" alt="OpenCV pose view" style="display: none;" />
             <div id="opencv-overlay-status" class="webcam-overlay-status">Waiting for OpenCV pose view...</div>
           </div>
 
-          <!-- Checkpoint Interval & Keypose Markers Slider Overlay (from YouTube Extension Content.js) -->
+          <!-- Checkpoint Interval Slider Overlay (only visible while editing checkpoints) -->
           <div id="segment-overlay-container" class="segment-overlay-container" style="display: none;">
-            <div id="keypose-ticks-container" class="keypose-ticks-container"></div>
             <div id="checkpoint-ghost-container" class="checkpoint-ghost-container"></div>
             <div id="checkpoint-primary-bar" class="checkpoint-primary-bar" style="left: 0%;">
               <div id="checkpoint-time-label" class="checkpoint-time-label">0.00s</div>
@@ -177,6 +183,9 @@
             <div class="training-action-buttons">
               <button id="btn-start-training" class="btn btn-record" type="button">
                 <span id="btn-start-training-text">🔴 Record &amp; Copy Video</span>
+              </button>
+              <button id="btn-training-layout-bar" class="btn btn-secondary" type="button" style="display: none;" title="Toggle Translucent Overlay vs Side-by-Side view">
+                <span>📐 Side by Side</span>
               </button>
               <button id="btn-skip-pose" class="btn btn-secondary" type="button" style="display: none;" title="Skip current keypose (Shortcut: S)">
                 <span>⏭ Skip Pose (S)</span>
@@ -316,15 +325,16 @@
           </div>
         </div>
 
-        <!-- Original video (left) and Three.js 3D viewport (right), scrubbed together -->
+        <!-- Uploaded teacher video (left) and Three.js 3D viewport (right), synced by keyposes -->
         <div class="viewport-row">
           <div id="video-panel" class="video-panel" style="display: none;">
-            <div class="panel-label">User Recording (Clean)</div>
+            <div id="video-panel-label" class="panel-label">Uploaded Video</div>
+            <div id="pip-keypose-status" class="pip-keypose-status" style="display: none;">⏸ Paused at Keypose #1</div>
             <video id="pip-video" playsinline muted></video>
           </div>
 
           <div id="three-canvas-container" class="three-container">
-            <div class="panel-label">Y Bot Animation</div>
+            <div class="panel-label">Y Bot Animation (Dojo)</div>
             <!-- Floating Camera Presets -->
             <div class="viewport-overlay-controls">
               <button class="overlay-btn" data-camera="perspective" title="3/4 Perspective">📐 3/4</button>
@@ -338,7 +348,9 @@
         <!-- Bottom Animation Player Controls Bar -->
         <div class="player-bar">
           <div class="scrubber-row">
-            <input type="range" id="timeline-scrubber" class="timeline-slider" min="0" max="1" step="0.01" value="0" />
+            <input type="range" id="timeline-scrubber" class="timeline-slider" list="mocap-keypose-datalist" min="0" max="1" step="0.01" value="0" />
+            <datalist id="mocap-keypose-datalist"></datalist>
+            <span id="keypose-step-badge" class="telemetry-pill" style="display: none; white-space: nowrap;">Pose 1 / 1</span>
             <span id="time-label" class="time-label">00:00 / 00:00</span>
           </div>
 
@@ -349,6 +361,12 @@
               </button>
               <button id="btn-reset" class="tool-btn" type="button" title="Restart Animation">
                 ⏮ Restart
+              </button>
+              <button id="btn-prev-checkpoint" class="tool-btn" type="button" title="Previous Keyframe" style="display: none;">
+                ⏮ Prev Keyframe
+              </button>
+              <button id="btn-next-checkpoint" class="tool-btn" type="button" title="Next Keyframe" style="display: none;">
+                ⏭ Next Keyframe
               </button>
               <button id="btn-loop" class="tool-btn active" type="button" title="Toggle Loop">
                 🔁 Loop
@@ -374,6 +392,6 @@
     </main>
   </div>
 
-  <script type="module" src="/static/js/app.js"></script>
+  <script type="module" src="/static/js/app.js?v=20261110_1"></script>
 </body>
 </html>

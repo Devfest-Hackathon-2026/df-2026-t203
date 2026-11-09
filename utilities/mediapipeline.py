@@ -689,7 +689,7 @@ class MedaiPipeline():
       ])
     return pose_dict
   
-  def mark_frame(self, frame):
+  def mark_frame(self, frame, draw_landmarks: bool = True):
     """
     Create the landmarks directly from an OpenCV frame (numpy array)
     """
@@ -704,7 +704,6 @@ class MedaiPipeline():
     if not pose_landmarker_result.pose_landmarks:
       return frame, None, None, None
       
-    annotated_image = self.draw_landmarks_on_image(image_3_channel, pose_landmarker_result)
     pose = pose_landmarker_result.pose_landmarks[0]
 
     pose_dict = self._pose_to_dict(pose) 
@@ -719,7 +718,11 @@ class MedaiPipeline():
       smoothed_world_landmarks = self.world_pose_filter.process(world_dict)
     # ============ CLAUDE GENERATED END ============
     
-    image = cv2.cvtColor(annotated_image, cv2.COLOR_RGB2BGR)
+    if draw_landmarks:
+      annotated_image = self.draw_landmarks_on_image(image_3_channel, pose_landmarker_result)
+      image = cv2.cvtColor(annotated_image, cv2.COLOR_RGB2BGR)
+    else:
+      image = frame.copy()
     return image, smoothed_pose, raw_world, smoothed_world_landmarks
 
 #----- playback functions

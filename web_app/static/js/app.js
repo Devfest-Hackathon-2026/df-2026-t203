@@ -2,7 +2,7 @@
  * Main Web Application Controller for Ninjoucon Motion Capture & Copy-Training Studio
  */
 
-import { AvatarViewer } from './viewer.js';
+import { AvatarViewer } from './viewer.js?v=20261110_1';
 
 class App {
   constructor() {
@@ -86,17 +86,21 @@ class App {
     this.btnEditCheckpoint = document.getElementById('btn-edit-checkpoint');
 
     this.segmentOverlayContainer = document.getElementById('segment-overlay-container');
-    this.keyposeTicksContainer = document.getElementById('keypose-ticks-container');
     this.checkpointGhostContainer = document.getElementById('checkpoint-ghost-container');
     this.checkpointPrimaryBar = document.getElementById('checkpoint-primary-bar');
     this.checkpointTimeLabel = document.getElementById('checkpoint-time-label');
     this.checkpointSlider = document.getElementById('checkpoint-slider');
 
-    // Extension Webcam Overlay
+    // Extension Webcam Overlay & Side-by-Side Controls
     this.webcamOverlay = document.getElementById('motionlearn-webcam-overlay');
+    this.webcamOverlayLabel = document.getElementById('webcam-overlay-label');
+    this.webcamOpacityControl = document.getElementById('webcam-opacity-control');
+    this.overlayOpacitySlider = document.getElementById('overlay-opacity-slider');
+    this.btnToggleTrainingLayout = document.getElementById('btn-toggle-training-layout');
     this.btnExpandOverlay = document.getElementById('btn-expand-overlay');
     this.opencvOverlayImg = document.getElementById('opencv-overlay-img');
     this.opencvOverlayStatus = document.getElementById('opencv-overlay-status');
+    this.trainingSideBySide = false;
 
     // Teacher Process & Copy-Training Cards
     this.teacherProcessCard = document.getElementById('teacher-process-card');
@@ -109,6 +113,7 @@ class App {
     this.trainingSubtext = document.getElementById('training-subtext');
     this.btnStartTraining = document.getElementById('btn-start-training');
     this.btnStartTrainingText = document.getElementById('btn-start-training-text');
+    this.btnTrainingLayoutBar = document.getElementById('btn-training-layout-bar');
     this.btnSkipPose = document.getElementById('btn-skip-pose');
     this.btnCheckpointContinue = document.getElementById('btn-checkpoint-continue');
     this.btnCheckpointRetry = document.getElementById('btn-checkpoint-retry');
@@ -138,17 +143,26 @@ class App {
     this.btnPlay = document.getElementById('btn-play');
     this.btnPlayIcon = document.getElementById('btn-play-icon');
     this.btnReset = document.getElementById('btn-reset');
+    this.btnPrevCheckpoint = document.getElementById('btn-prev-checkpoint');
+    this.btnNextCheckpoint = document.getElementById('btn-next-checkpoint');
     this.btnLoop = document.getElementById('btn-loop');
     this.timeLabel = document.getElementById('time-label');
     this.timelineScrubber = document.getElementById('timeline-scrubber');
+    this.mocapKeyposeDatalist = document.getElementById('mocap-keypose-datalist');
+    this.keyposeStepBadge = document.getElementById('keypose-step-badge');
     this.speedSelect = document.getElementById('speed-select');
     this.btnTogglePip = document.getElementById('btn-toggle-pip');
     this.videoPanel = document.getElementById('video-panel');
+    this.videoPanelLabel = document.getElementById('video-panel-label');
+    this.pipKeyposeStatus = document.getElementById('pip-keypose-status');
     this.pipVideo = document.getElementById('pip-video');
     this.downloadUserMp4 = document.getElementById('download-user-mp4');
     this.downloadGlb = document.getElementById('download-glb');
     this.downloadBlend = document.getElementById('download-blend');
     this.downloadFbx = document.getElementById('download-fbx');
+    this.isTeacherSyncedRecording = false;
+    this.processedKeyposeSync = [];
+    this.pipSyncState = { activeIdx: -1, phase: 'idle', lastSeekTarget: -1 };
   }
 
   bindEvents() {
@@ -263,11 +277,30 @@ class App {
       this.refreshCheckpointTimelineUI();
     });
 
-    // Expand / Collapse Webcam Overlay inside Player
+    // Expand / Collapse Webcam Overlay inside Player (Full Translucent Overlay vs Corner PIP)
     this.btnExpandOverlay.addEventListener('click', () => {
+      if (this.trainingSideBySide) {
+        this.toggleTrainingLayout(false);
+      }
       const isExpanded = this.webcamOverlay.classList.toggle('expanded');
-      this.btnExpandOverlay.textContent = isExpanded ? '🗗' : '⛶';
+      this.btnExpandOverlay.textContent = isExpanded ? '🗗 Corner PIP' : '⛶ Full Overlay';
     });
+
+    // Opacity slider for Translucent Webcam Overlay
+    if (this.overlayOpacitySlider) {
+      this.overlayOpacitySlider.addEventListener('input', (e) => {
+        const val = parseFloat(e.target.value || '0.45');
+        this.webcamOverlay.style.setProperty('--webcam-overlay-opacity', String(val));
+      });
+    }
+
+    // Toggle between Translucent Overlay and Side-by-Side
+    if (this.btnToggleTrainingLayout) {
+      this.btnToggleTrainingLayout.addEventListener('click', () => this.toggleTrainingLayout());
+    }
+    if (this.btnTrainingLayoutBar) {
+      this.btnTrainingLayoutBar.addEventListener('click', () => this.toggleTrainingLayout());
+    }
 
     // Process Teacher Video into Keyposes
     this.btnProcessKeyposes.addEventListener('click', () => this.startTeacherKeyposeProcessing());
@@ -296,18 +329,25 @@ class App {
     this.btnPlay.addEventListener('click', () => this.togglePlayback());
     this.btnReset.addEventListener('click', () => {
       if (this.viewer) this.viewer.reset();
-      if (this.pipVideo) {
-        this.pipVideo.pause();
-        this.pipVideo.currentTime = 0;
-      }
+      this.pipSyncState = { activeIdx: -1, phase: 'idle', lastSeekTarget: -1 };
+      this.syncPipVideoWithMocap(0, false, true);
       this.updatePlayButtonState(false);
     });
+
+    if (this.btnPrevCheckpoint) {
+      this.btnPrevCheckpoint.addEventListener('click', () => this.stepProcessedCheckpoint(-1));
+    }
+    if (this.btnNextCheckpoint) {
+      this.btnNextCheckpoint.addEventListener('click', () => this.stepProcessedCheckpoint(1));
+    }
 
     this.btnLoop.addEventListener('click', () => {
       const isLoop = !this.btnLoop.classList.contains('active');
       this.btnLoop.classList.toggle('active', isLoop);
       if (this.viewer) this.viewer.setLoop(isLoop);
-      if (this.pipVideo) this.pipVideo.loop = isLoop;
+      if (this.pipVideo) {
+        this.pipVideo.loop = !this.isTeacherSyncedRecording && isLoop;
+      }
     });
 
     const startScrub = () => {
@@ -320,9 +360,9 @@ class App {
     const endScrub = () => {
       if (this.viewer) {
         this.viewer.isSeeking = false;
-        if (this.viewer.isPlaying && this.pipVideo && this.videoPanel.style.display !== 'none') {
-          this.pipVideo.play().catch(() => {});
-        }
+        const currentMocapTime = parseFloat(this.timelineScrubber.value || '0');
+        this.pipSyncState = { activeIdx: -1, phase: 'idle', lastSeekTarget: -1 };
+        this.syncPipVideoWithMocap(currentMocapTime, Boolean(this.viewer.isPlaying), true);
       }
     };
 
@@ -331,20 +371,33 @@ class App {
     this.timelineScrubber.addEventListener('change', endScrub);
 
     this.timelineScrubber.addEventListener('input', (e) => {
-      const time = parseFloat(e.target.value);
-      if (this.viewer) this.viewer.seek(time);
-      if (this.pipVideo && Number.isFinite(time)) {
-        try {
-          this.pipVideo.currentTime = time;
-        } catch (_) {}
+      let time = parseFloat(e.target.value);
+      if (this.isTeacherSyncedRecording && this.processedKeyposeSync.length > 0) {
+        time = this.snapMocapTimeToKeypose(time);
+        this.timelineScrubber.value = time;
       }
+      if (this.viewer) this.viewer.seek(time);
+      this.syncPipVideoWithMocap(time, false, false);
     });
 
     this.speedSelect.addEventListener('change', (e) => {
       const speed = parseFloat(e.target.value);
       if (this.viewer) this.viewer.setSpeed(speed);
-      if (this.pipVideo) this.pipVideo.playbackRate = speed;
+      if (this.pipVideo) {
+        this.pipVideo.playbackRate = speed;
+      }
     });
+
+    if (this.pipVideo) {
+      this.pipVideo.addEventListener('loadedmetadata', () => {
+        if (this.isTeacherSyncedRecording && this.viewer && this.viewer.duration) {
+          this.initProcessedKeyposeSync(this.viewer.duration);
+        }
+        const currentTime = parseFloat(this.timelineScrubber.value || '0');
+        this.pipSyncState = { activeIdx: -1, phase: 'idle', lastSeekTarget: -1 };
+        this.syncPipVideoWithMocap(currentTime, Boolean(this.viewer && this.viewer.isPlaying), true);
+      });
+    }
 
     if (this.btnTogglePip && this.videoPanel) {
       this.btnTogglePip.addEventListener('click', () => {
@@ -355,16 +408,8 @@ class App {
 
         if (nextVisible && this.pipVideo) {
           const currentTime = parseFloat(this.timelineScrubber.value || '0');
-          this.pipVideo.loop = this.btnLoop.classList.contains('active');
-          this.pipVideo.playbackRate = parseFloat(this.speedSelect.value || '1.0');
-          try {
-            this.pipVideo.currentTime = currentTime;
-          } catch (_) {}
-          if (this.viewer && this.viewer.isPlaying) {
-            this.pipVideo.play().catch(() => {});
-          } else {
-            this.pipVideo.pause();
-          }
+          this.pipVideo.loop = !this.isTeacherSyncedRecording && this.btnLoop.classList.contains('active');
+          this.syncPipVideoWithMocap(currentTime, Boolean(this.viewer && this.viewer.isPlaying));
         } else if (this.pipVideo) {
           this.pipVideo.pause();
         }
@@ -1048,7 +1093,6 @@ class App {
     }
 
     this.checkpointSlider.max = duration;
-    this.renderKeyposeTicks(video.timestamps || {}, duration);
 
     const hasSavedCheckpoint = video.checkpoint_interval !== undefined && video.checkpoint_interval !== null;
     if (this.checkpointEditorOpen || !hasSavedCheckpoint) {
@@ -1060,7 +1104,7 @@ class App {
       this.checkpointSavedPill.style.display = 'none';
     } else {
       this.updateSegmentMarkers(parseFloat(video.checkpoint_interval));
-      this.segmentOverlayContainer.style.display = 'block';
+      this.segmentOverlayContainer.style.display = 'none';
       this.segmentBtnContainer.style.display = 'none';
       this.checkpointSavedPill.style.display = 'flex';
       this.checkpointSavedText.textContent =
@@ -1068,22 +1112,6 @@ class App {
           ? `Checkpoint Interval: ${Number(video.checkpoint_interval).toFixed(2)}s (Every ${video.checkpoint_poses} poses)`
           : `Checkpoint: Full Video (${video.keypose_count} poses)`;
     }
-  }
-
-  renderKeyposeTicks(timestamps, duration) {
-    this.keyposeTicksContainer.innerHTML = '';
-    if (!timestamps || !duration) return;
-
-    Object.entries(timestamps).forEach(([poseIdx, timeSec]) => {
-      const t = parseFloat(timeSec);
-      if (Number.isFinite(t) && t >= 0 && t <= duration) {
-        const tick = document.createElement('div');
-        tick.className = 'keypose-tick';
-        tick.style.left = `${(t / duration) * 100}%`;
-        tick.title = `Keypose #${poseIdx} (${t.toFixed(2)}s)`;
-        this.keyposeTicksContainer.appendChild(tick);
-      }
-    });
   }
 
   updateSegmentMarkers(val) {
@@ -1217,6 +1245,37 @@ class App {
   // -------------------------------------------------------------
   // Step 2: Interactive Copy-Training & Clean Recording Session
   // -------------------------------------------------------------
+  toggleTrainingLayout(forceSideBySide) {
+    this.trainingSideBySide =
+      typeof forceSideBySide === 'boolean' ? forceSideBySide : !this.trainingSideBySide;
+
+    if (this.teacherPlayerContainer) {
+      this.teacherPlayerContainer.classList.toggle('side-by-side', this.trainingSideBySide);
+    }
+
+    if (this.webcamOverlayLabel) {
+      this.webcamOverlayLabel.textContent = this.trainingSideBySide
+        ? 'Live Webcam (Side by Side)'
+        : 'Translucent Webcam Overlay';
+    }
+
+    if (this.webcamOpacityControl) {
+      this.webcamOpacityControl.style.display = this.trainingSideBySide ? 'none' : 'inline-flex';
+    }
+
+    if (this.btnExpandOverlay) {
+      this.btnExpandOverlay.style.display = this.trainingSideBySide ? 'none' : 'inline-block';
+    }
+
+    const toggleText = this.trainingSideBySide ? '🔀 Translucent Overlay' : '📐 Side by Side';
+    if (this.btnToggleTrainingLayout) {
+      this.btnToggleTrainingLayout.textContent = toggleText;
+    }
+    if (this.btnTrainingLayoutBar) {
+      this.btnTrainingLayoutBar.innerHTML = `<span>${toggleText}</span>`;
+    }
+  }
+
   startTrainingSession() {
     if (!this.selectedVideo || !this.selectedVideo.is_processed) {
       alert('Please process the video into keyposes before taking a recording.');
@@ -1224,19 +1283,31 @@ class App {
     }
     this.stopTrainingSession(true);
 
-    // Show Webcam Overlay & Telemetry Bar
+    // Show Webcam Overlay (defaulting to full-video translucent overlay or side-by-side) & Telemetry Bar
     this.webcamOverlay.style.display = 'block';
+    this.webcamOverlay.classList.add('expanded');
+    if (this.btnExpandOverlay) {
+      this.btnExpandOverlay.textContent = '🗗 Corner PIP';
+    }
+    if (this.overlayOpacitySlider) {
+      this.webcamOverlay.style.setProperty('--webcam-overlay-opacity', this.overlayOpacitySlider.value || '0.45');
+    }
+    this.toggleTrainingLayout(this.trainingSideBySide);
+
     this.opencvOverlayImg.style.display = 'none';
     this.opencvOverlayStatus.style.display = 'flex';
     this.opencvOverlayStatus.textContent = 'Starting camera & pose detector...';
 
     this.btnStartTraining.style.display = 'none';
+    if (this.btnTrainingLayoutBar) {
+      this.btnTrainingLayoutBar.style.display = 'inline-flex';
+    }
     this.btnSkipPose.style.display = 'inline-flex';
     this.btnStopTraining.style.display = 'inline-flex';
     this.trainingTelemetryBar.style.display = 'flex';
     this.trainingHeadline.textContent = '🔴 Recording & Copy-Training Active';
     this.trainingSubtext.textContent =
-      'Match each keypose in the Webcam Overlay to make the video play forward! Your clean camera feed (without overlays) is being recorded.';
+      'Match each keypose to make the video play forward! Toggle between Translucent Overlay and Side-by-Side anytime.';
 
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${window.location.host}/ws/training/${this.selectedVideo.id}`;
@@ -1308,11 +1379,15 @@ class App {
         this.opencvOverlayStatus.style.display = 'none';
       }
 
-      this.telemetryPose.textContent = `Pose: ${msg.pose_index || 1} / ${msg.total_poses || '-'}`;
+      const poseNum = typeof msg.pose_id === 'number' ? msg.pose_id + 1 : (msg.pose_index || 1);
+      const errVal = typeof msg.score_ema === 'number' ? msg.score_ema : msg.error_score;
+      const reqHold = msg.required_hold_frames || msg.hold_required || 8;
+
+      this.telemetryPose.textContent = `Pose: ${poseNum} / ${msg.total_poses || '-'}`;
       this.telemetryState.textContent = `State: ${msg.state || 'PAUSED'}`;
       this.telemetryError.textContent =
-        typeof msg.error_score === 'number' ? `Error: ${msg.error_score.toFixed(3)}` : 'Error: --';
-      this.telemetryHold.textContent = `Hold: ${msg.hold_frames || 0} / ${msg.hold_required || 8}`;
+        typeof errVal === 'number' ? `Error: ${errVal.toFixed(3)}` : 'Error: --';
+      this.telemetryHold.textContent = `Hold: ${msg.hold_frames || 0} / ${reqHold}`;
       this.telemetryDtw.textContent =
         typeof msg.dtw_score === 'number' && msg.dtw_score > 0
           ? `Movement Score: ${msg.dtw_score}%`
@@ -1388,9 +1463,17 @@ class App {
 
   resetTrainingUi() {
     this.webcamOverlay.style.display = 'none';
-    this.webcamOverlay.classList.remove('expanded');
-    this.btnExpandOverlay.textContent = '⛶';
+    this.webcamOverlay.classList.add('expanded');
+    if (this.teacherPlayerContainer) {
+      this.teacherPlayerContainer.classList.remove('side-by-side');
+    }
+    if (this.btnExpandOverlay) {
+      this.btnExpandOverlay.textContent = '🗗 Corner PIP';
+    }
     this.btnStartTraining.style.display = 'inline-flex';
+    if (this.btnTrainingLayoutBar) {
+      this.btnTrainingLayoutBar.style.display = 'none';
+    }
     this.btnSkipPose.style.display = 'none';
     this.btnCheckpointContinue.style.display = 'none';
     this.btnCheckpointRetry.style.display = 'none';
@@ -1567,12 +1650,24 @@ class App {
   }
 
   // -------------------------------------------------------------
-  // Processed Three.js 3D View
+  // Processed Three.js 3D View (Keypose-Synced with Uploaded Video)
   // -------------------------------------------------------------
   setupProcessedView() {
     const rec = this.selectedRecording;
     this.processedTitle.innerHTML = `<span>Recording #${rec.recording_no}</span> <span class="badge badge-processed">✓ Processed</span>`;
     this.processedDate.textContent = `${rec.video_name || 'Video'} • ${rec.created_at}`;
+
+    const parentVideo =
+      rec && rec.video_id && rec.video_id !== 'misc_mocap'
+        ? this.selectedVideo || this.videos.find((v) => v.id === rec.video_id) || null
+        : null;
+    this.isTeacherSyncedRecording = Boolean(
+      rec && rec.video_id && rec.video_id !== 'misc_mocap'
+    );
+    const teacherFilename =
+      (parentVideo && parentVideo.filename) || (rec && rec.teacher_video_filename) || null;
+    const teacherDisplayName =
+      (parentVideo && parentVideo.name) || (rec && rec.video_name) || 'Uploaded Video';
 
     if (this.downloadUserMp4) {
       this.downloadUserMp4.href = `/recordings/${rec.filename}`;
@@ -1602,11 +1697,60 @@ class App {
 
     if (this.pipVideo) {
       this.pipVideo.pause();
-      this.pipVideo.src = `/recordings/${rec.filename}`;
-      this.pipVideo.loop = this.btnLoop.classList.contains('active');
+      this.pipSyncState = { activeIdx: -1, phase: 'idle', lastSeekTarget: -1 };
+      if (this.isTeacherSyncedRecording) {
+        const sideUrl = teacherFilename
+          ? `/teacher_videos/${teacherFilename}`
+          : `/api/recordings/${rec.id}/side_video`;
+        this.pipVideo.src = sideUrl;
+        this.pipVideo.load();
+        this.pipVideo.loop = false;
+        if (this.videoPanel) {
+          this.videoPanel.style.display = 'flex';
+        }
+        if (this.btnTogglePip) {
+          this.btnTogglePip.classList.add('active');
+        }
+        if (this.videoPanelLabel) {
+          this.videoPanelLabel.textContent = `Uploaded Video: ${teacherDisplayName}`;
+        }
+        if (this.pipKeyposeStatus) {
+          this.pipKeyposeStatus.style.display = 'block';
+        }
+        if (this.keyposeStepBadge) {
+          this.keyposeStepBadge.style.display = 'inline-block';
+        }
+        if (this.btnPrevCheckpoint) {
+          this.btnPrevCheckpoint.style.display = 'inline-flex';
+        }
+        if (this.btnNextCheckpoint) {
+          this.btnNextCheckpoint.style.display = 'inline-flex';
+        }
+      } else {
+        this.pipVideo.src = `/recordings/${rec.filename}`;
+        this.pipVideo.load();
+        this.pipVideo.loop = this.btnLoop.classList.contains('active');
+        if (this.videoPanelLabel) {
+          this.videoPanelLabel.textContent = 'User Recording (Clean)';
+        }
+        if (this.pipKeyposeStatus) {
+          this.pipKeyposeStatus.style.display = 'none';
+        }
+        if (this.keyposeStepBadge) {
+          this.keyposeStepBadge.style.display = 'none';
+        }
+        if (this.btnPrevCheckpoint) {
+          this.btnPrevCheckpoint.style.display = 'none';
+        }
+        if (this.btnNextCheckpoint) {
+          this.btnNextCheckpoint.style.display = 'none';
+        }
+      }
       this.pipVideo.playbackRate = parseFloat(this.speedSelect.value || '1.0');
-      this.pipVideo.currentTime = 0;
     }
+
+    this.initProcessedKeyposeSync(this.viewer && this.viewer.duration ? this.viewer.duration : 15.0);
+    this.syncPipVideoWithMocap(0, false, true);
 
     if (!this.viewer) {
       this.viewer = new AvatarViewer('three-canvas-container', {
@@ -1614,31 +1758,20 @@ class App {
           this.timelineScrubber.max = duration;
           this.timelineScrubber.value = current;
           this.timeLabel.textContent = `${this.formatTime(current)} / ${this.formatTime(duration)}`;
-
-          if (
-            this.pipVideo &&
-            this.videoPanel &&
-            this.videoPanel.style.display !== 'none' &&
-            this.pipVideo.readyState >= 1
-          ) {
-            if (Math.abs(this.pipVideo.currentTime - current) > 0.15) {
-              try {
-                this.pipVideo.currentTime = current;
-              } catch (_) {}
-            }
-          }
+          this.syncPipVideoWithMocap(
+            current,
+            Boolean(this.viewer && this.viewer.isPlaying && !this.viewer.isSeeking),
+            false
+          );
         },
         onLoaded: (duration) => {
           this.timelineScrubber.max = duration;
           this.timelineScrubber.value = 0;
           this.timeLabel.textContent = `00:00 / ${this.formatTime(duration)}`;
           this.updatePlayButtonState(false);
-          if (this.pipVideo) {
-            this.pipVideo.pause();
-            try {
-              this.pipVideo.currentTime = 0;
-            } catch (_) {}
-          }
+          this.initProcessedKeyposeSync(duration);
+          this.pipSyncState = { activeIdx: -1, phase: 'idle', lastSeekTarget: -1 };
+          this.syncPipVideoWithMocap(0, false, true);
         },
         onFinished: () => {
           this.updatePlayButtonState(false);
@@ -1647,11 +1780,455 @@ class App {
           }
         },
       });
+    } else {
+      requestAnimationFrame(() => this.viewer.handleResize());
     }
 
     if (rec.glb_filename) {
       const glbUrl = `/outputs/${rec.output_dir_name}/${rec.glb_filename}`;
       this.viewer.loadModel(glbUrl);
+    }
+  }
+
+  initProcessedKeyposeSync(mocapDuration) {
+    this.processedKeyposeSync = [];
+    if (this.mocapKeyposeDatalist) {
+      this.mocapKeyposeDatalist.innerHTML = '';
+    }
+
+    const rec = this.selectedRecording;
+    if (!this.isTeacherSyncedRecording || !rec) return;
+
+    const parentVideo =
+      this.selectedVideo || this.videos.find((v) => v.id === rec.video_id) || null;
+    if (!parentVideo) return;
+
+    const dur = Math.max(1.0, Number(mocapDuration) || 15.0);
+    const rawSync = Array.isArray(rec.keypose_sync) ? rec.keypose_sync : [];
+    const teacherEndFallback =
+      this.pipVideo && Number.isFinite(this.pipVideo.duration) && this.pipVideo.duration > 0
+        ? this.pipVideo.duration
+        : null;
+
+    if (rawSync.length > 0) {
+      const lastNextArrive = Number(
+        rawSync[rawSync.length - 1].next_mocap_arrive_time || dur
+      );
+      const scale = lastNextArrive > 0.1 ? dur / lastNextArrive : 1.0;
+
+      this.processedKeyposeSync = rawSync.map((item, idx) => {
+        const arrive = Number(item.mocap_arrive_time || 0) * scale;
+        const nextArrive =
+          idx + 1 === rawSync.length
+            ? dur
+            : Number(item.next_mocap_arrive_time || dur) * scale;
+        const segDur = Math.max(0.25, nextArrive - arrive);
+        // Brief checkpoint pause followed by smooth forward playback to the next checkpoint
+        const pauseWindow =
+          idx === 0
+            ? Math.min(0.45, segDur * 0.2)
+            : Math.min(0.75, segDur * 0.25);
+        const match = Math.min(nextArrive - 0.1, arrive + pauseWindow);
+        const tCur = Number(item.teacher_time || 0);
+        let tNxt = Number(item.next_teacher_time ?? tCur);
+        if (idx + 1 === rawSync.length && tNxt <= tCur) {
+          tNxt =
+            teacherEndFallback && teacherEndFallback > tCur
+              ? teacherEndFallback
+              : tCur + 1.0;
+        }
+        return {
+          pose_id: Number(item.pose_id ?? idx),
+          teacher_time: tCur,
+          mocap_arrive_time: arrive,
+          mocap_match_time: match,
+          next_teacher_time: tNxt,
+          next_mocap_arrive_time: nextArrive,
+        };
+      });
+    } else if (parentVideo.timestamps && Object.keys(parentVideo.timestamps).length > 0) {
+      // Fallback: build keypose segments proportionally from parentVideo.timestamps
+      const sortedKeys = Object.keys(parentVideo.timestamps).sort(
+        (a, b) => Number(a) - Number(b)
+      );
+      const total = sortedKeys.length;
+      const weights = sortedKeys.map((k, idx) => {
+        const tCur = Number(parentVideo.timestamps[k] || 0);
+        const tNxt =
+          idx + 1 < total
+            ? Number(parentVideo.timestamps[sortedKeys[idx + 1]] || tCur)
+            : tCur + 1.0;
+        return 1.2 + Math.max(0, tNxt - tCur);
+      });
+      const totalWeight = weights.reduce((acc, w) => acc + w, 0) || total;
+
+      let cursor = 0.0;
+      this.processedKeyposeSync = sortedKeys.map((k, idx) => {
+        const segDur = dur * (weights[idx] / totalWeight);
+        const arrive = cursor;
+        const nextArrive = idx + 1 === total ? dur : cursor + segDur;
+        const tCur = Number(parentVideo.timestamps[k] || 0);
+        let tNxt =
+          idx + 1 < total
+            ? Number(parentVideo.timestamps[sortedKeys[idx + 1]] || tCur)
+            : tCur;
+        if (idx + 1 === total && tNxt <= tCur) {
+          tNxt =
+            teacherEndFallback && teacherEndFallback > tCur
+              ? teacherEndFallback
+              : tCur + 1.0;
+        }
+        const pauseWindow =
+          idx === 0
+            ? Math.min(0.45, segDur * 0.2)
+            : Math.min(0.75, segDur * 0.25);
+        const match = Math.min(nextArrive - 0.1, arrive + pauseWindow);
+        cursor = nextArrive;
+        return {
+          pose_id: Number(k),
+          teacher_time: tCur,
+          mocap_arrive_time: arrive,
+          mocap_match_time: match,
+          next_teacher_time: tNxt,
+          next_mocap_arrive_time: nextArrive,
+        };
+      });
+    }
+
+    if (this.mocapKeyposeDatalist && this.processedKeyposeSync.length > 0) {
+      this.processedKeyposeSync.forEach((seg, idx) => {
+        const opt = document.createElement('option');
+        opt.value = seg.mocap_arrive_time.toFixed(3);
+        opt.label = `Keyframe ${idx + 1}`;
+        this.mocapKeyposeDatalist.appendChild(opt);
+      });
+    }
+  }
+
+  getActiveCheckpointIndex(mocapTime) {
+    if (!this.processedKeyposeSync || this.processedKeyposeSync.length === 0) {
+      return 0;
+    }
+    const total = this.processedKeyposeSync.length;
+    for (let i = 0; i < total; i += 1) {
+      const seg = this.processedKeyposeSync[i];
+      if (
+        mocapTime >= seg.mocap_arrive_time - 0.001 &&
+        (mocapTime < seg.next_mocap_arrive_time - 0.001 || i === total - 1)
+      ) {
+        return i;
+      }
+    }
+    return 0;
+  }
+
+  stepProcessedCheckpoint(delta) {
+    if (
+      !this.isTeacherSyncedRecording ||
+      !this.processedKeyposeSync ||
+      this.processedKeyposeSync.length === 0
+    ) {
+      return;
+    }
+    const total = this.processedKeyposeSync.length;
+    const currentMocapTime = parseFloat(this.timelineScrubber.value || '0');
+    const curIdx =
+      this.pipSyncState && this.pipSyncState.activeIdx >= 0
+        ? this.pipSyncState.activeIdx
+        : this.getActiveCheckpointIndex(currentMocapTime);
+    const nextIdx = Math.max(0, Math.min(total - 1, curIdx + delta));
+    const targetSeg = this.processedKeyposeSync[nextIdx];
+    const targetMocapTime = targetSeg.mocap_arrive_time;
+
+    this.timelineScrubber.value = targetMocapTime;
+    if (this.viewer) {
+      this.viewer.setKeyframeBarrier(targetSeg.next_mocap_arrive_time);
+      this.viewer.seek(targetMocapTime);
+    }
+    this.pipSyncState = {
+      activeIdx: nextIdx,
+      phase: 'idle',
+      lastSeekTarget: -1,
+      bothReachedAt: 0,
+    };
+    this.syncPipVideoWithMocap(
+      targetMocapTime,
+      Boolean(this.viewer && this.viewer.isPlaying),
+      true
+    );
+  }
+
+  snapMocapTimeToKeypose(rawTime) {
+    if (!this.processedKeyposeSync || this.processedKeyposeSync.length === 0) {
+      return rawTime;
+    }
+    let bestEntry = this.processedKeyposeSync[0];
+    let bestDist = Math.abs(rawTime - bestEntry.mocap_arrive_time);
+    for (let i = 1; i < this.processedKeyposeSync.length; i += 1) {
+      const candidate = this.processedKeyposeSync[i];
+      const dist = Math.abs(rawTime - candidate.mocap_arrive_time);
+      if (dist < bestDist) {
+        bestDist = dist;
+        bestEntry = candidate;
+      }
+    }
+    return bestEntry.mocap_arrive_time;
+  }
+
+  seekPipVideoOnce(targetTime, force = false) {
+    if (!this.pipVideo || this.pipVideo.readyState < 1) return;
+    const clampedTarget = Math.max(
+      0,
+      Number.isFinite(this.pipVideo.duration) && this.pipVideo.duration > 0
+        ? Math.min(this.pipVideo.duration - 0.01, targetTime)
+        : targetTime
+    );
+    // Avoid aborting an in-flight asynchronous H.264 seek unless forced
+    if (!force && this.pipVideo.seeking) return;
+    if (
+      !force &&
+      Math.abs(this.pipSyncState.lastSeekTarget - clampedTarget) < 0.03 &&
+      Math.abs(this.pipVideo.currentTime - clampedTarget) < 0.15
+    ) {
+      return;
+    }
+    try {
+      this.pipSyncState.lastSeekTarget = clampedTarget;
+      this.pipVideo.currentTime = clampedTarget;
+    } catch (_) {}
+  }
+
+  syncPipVideoWithMocap(mocapTime, isMocapPlaying, forceSeek = false) {
+    if (!this.pipVideo) return;
+
+    // Standalone Misc recording (not tied to an uploaded teacher video)
+    if (!this.isTeacherSyncedRecording || this.processedKeyposeSync.length === 0) {
+      if (this.viewer) {
+        this.viewer.setKeyframeBarrier(null);
+      }
+      if (
+        this.videoPanel &&
+        this.videoPanel.style.display !== 'none' &&
+        this.pipVideo.readyState >= 1
+      ) {
+        if (
+          !this.pipVideo.seeking &&
+          Math.abs(this.pipVideo.currentTime - mocapTime) > 0.25
+        ) {
+          try {
+            this.pipVideo.currentTime = mocapTime;
+          } catch (_) {}
+        }
+        if (isMocapPlaying && this.pipVideo.paused) {
+          this.pipVideo.play().catch(() => {});
+        } else if (!isMocapPlaying && !this.pipVideo.paused) {
+          this.pipVideo.pause();
+        }
+      }
+      return;
+    }
+
+    const total = this.processedKeyposeSync.length;
+    const viewerSpeed = parseFloat(this.speedSelect.value || '1.0');
+
+    // If paused or scrubbing across keyframes:
+    if (!isMocapPlaying) {
+      const activeIdx = this.getActiveCheckpointIndex(mocapTime);
+      const seg = this.processedKeyposeSync[activeIdx];
+      if (this.viewer) {
+        this.viewer.setKeyframeBarrier(seg.next_mocap_arrive_time);
+      }
+      if (this.keyposeStepBadge) {
+        this.keyposeStepBadge.textContent = `Keyframe ${activeIdx + 1} / ${total}`;
+      }
+      if (!this.pipVideo.paused) {
+        this.pipVideo.pause();
+      }
+      if (this.pipKeyposeStatus) {
+        this.pipKeyposeStatus.textContent = `⏸ Keyframe #${activeIdx + 1}/${total} (${seg.teacher_time.toFixed(1)}s) — Paused at Keyframe`;
+      }
+      if (
+        forceSeek ||
+        this.pipSyncState.activeIdx !== activeIdx ||
+        this.pipSyncState.phase !== 'PAUSED'
+      ) {
+        this.pipSyncState.activeIdx = activeIdx;
+        this.pipSyncState.phase = 'PAUSED';
+        this.pipSyncState.bothReachedAt = 0;
+        this.seekPipVideoOnce(seg.teacher_time, true);
+      }
+      return;
+    }
+
+    // Active playback: initialize or re-anchor keyframe segment when starting playback or after a seek
+    if (
+      forceSeek ||
+      this.pipSyncState.phase !== 'PLAYING' ||
+      this.pipSyncState.activeIdx < 0 ||
+      this.pipSyncState.activeIdx >= total
+    ) {
+      const startIdx =
+        this.pipSyncState.activeIdx >= 0 &&
+        this.pipSyncState.activeIdx < total &&
+        Math.abs(
+          mocapTime -
+            this.processedKeyposeSync[this.pipSyncState.activeIdx].mocap_arrive_time
+        ) < 0.08
+          ? this.pipSyncState.activeIdx
+          : this.getActiveCheckpointIndex(mocapTime);
+      const startSeg = this.processedKeyposeSync[startIdx];
+
+      this.pipSyncState.activeIdx = startIdx;
+      this.pipSyncState.phase = 'PLAYING';
+      this.pipSyncState.bothReachedAt = 0;
+
+      if (this.viewer) {
+        this.viewer.setKeyframeBarrier(startSeg.next_mocap_arrive_time);
+      }
+
+      this.pipVideo.playbackRate = viewerSpeed;
+      if (
+        this.pipVideo.currentTime < startSeg.teacher_time - 0.1 ||
+        this.pipVideo.currentTime > startSeg.next_teacher_time + 0.1 ||
+        forceSeek
+      ) {
+        this.seekPipVideoOnce(startSeg.teacher_time, true);
+      }
+
+      if (
+        startSeg.next_teacher_time > startSeg.teacher_time + 0.02 &&
+        this.pipVideo.paused
+      ) {
+        this.pipVideo.play().catch(() => {});
+      }
+    }
+
+    const activeIdx = this.pipSyncState.activeIdx;
+    const seg = this.processedKeyposeSync[activeIdx];
+    const nextKeyframeNum = Math.min(total, activeIdx + 2);
+
+    if (this.viewer) {
+      this.viewer.setKeyframeBarrier(seg.next_mocap_arrive_time);
+    }
+    if (this.keyposeStepBadge) {
+      this.keyposeStepBadge.textContent = `Keyframe ${activeIdx + 1} / ${total}`;
+    }
+
+    // Check whether the 3D mocap and the uploaded video have reached the target keypoint
+    const mocapReached = mocapTime >= seg.next_mocap_arrive_time - 0.015;
+    const teacherSpan = Math.max(0.0, seg.next_teacher_time - seg.teacher_time);
+    const videoUnavailable = Boolean(
+      this.pipVideo.error || this.pipVideo.readyState < 1
+    );
+    const teacherReached =
+      videoUnavailable ||
+      teacherSpan <= 0.02 ||
+      this.pipVideo.currentTime >= seg.next_teacher_time - 0.025 ||
+      this.pipVideo.ended;
+
+    // If the uploaded video reached the next keyframe first, pause it there so it waits for the 3D mocap
+    if (teacherReached) {
+      if (!this.pipVideo.paused) {
+        this.pipVideo.pause();
+      }
+    } else {
+      // Otherwise keep the uploaded video playing toward seg.next_teacher_time at viewerSpeed
+      if (Math.abs(this.pipVideo.playbackRate - viewerSpeed) > 0.01) {
+        this.pipVideo.playbackRate = viewerSpeed;
+      }
+      if (this.pipVideo.paused && !this.pipVideo.seeking) {
+        this.pipVideo.play().catch(() => {});
+      }
+    }
+
+    // Case 1: Uploaded Video reached the next keyframe first -> waiting for 3D Mocap
+    if (teacherReached && !mocapReached) {
+      this.pipSyncState.bothReachedAt = 0;
+      if (this.pipKeyposeStatus) {
+        this.pipKeyposeStatus.textContent = `⏸ Keyframe #${nextKeyframeNum}/${total} (${seg.next_teacher_time.toFixed(1)}s) — Video Waiting for 3D Mocap (${mocapTime.toFixed(1)}s / ${seg.next_mocap_arrive_time.toFixed(1)}s)`;
+      }
+      return;
+    }
+
+    // Case 2: 3D Mocap reached the next keyframe first -> waiting for Uploaded Video
+    if (mocapReached && !teacherReached) {
+      this.pipSyncState.bothReachedAt = 0;
+      if (this.pipKeyposeStatus) {
+        this.pipKeyposeStatus.textContent = `⏸ Keyframe #${nextKeyframeNum}/${total} — 3D Mocap Waiting for Video (${this.pipVideo.currentTime.toFixed(1)}s / ${seg.next_teacher_time.toFixed(1)}s)`;
+      }
+      return;
+    }
+
+    // Case 3: Neither has reached the next keyframe yet -> both advancing toward Keyframe #nextKeyframeNum
+    if (!mocapReached && !teacherReached) {
+      this.pipSyncState.bothReachedAt = 0;
+      if (this.pipKeyposeStatus) {
+        this.pipKeyposeStatus.textContent = `▶ Moving to Keyframe #${nextKeyframeNum}/${total} (Video ${this.pipVideo.currentTime.toFixed(1)}s/${seg.next_teacher_time.toFixed(1)}s • Mocap ${mocapTime.toFixed(1)}s/${seg.next_mocap_arrive_time.toFixed(1)}s)`;
+      }
+      return;
+    }
+
+    // Case 4: BOTH have reached Keyframe #nextKeyframeNum!
+    if (!this.pipSyncState.bothReachedAt) {
+      this.pipSyncState.bothReachedAt = performance.now();
+    }
+    if (this.pipKeyposeStatus) {
+      this.pipKeyposeStatus.textContent = `✓ Keyframe #${nextKeyframeNum}/${total} Reached by Both! Continuing...`;
+    }
+
+    // Brief 200ms synchronization beat at the keypoint before both advance to the next keypoint
+    if (performance.now() - this.pipSyncState.bothReachedAt < 200) {
+      return;
+    }
+
+    if (activeIdx + 1 < total) {
+      const nextIdx = activeIdx + 1;
+      const nextSeg = this.processedKeyposeSync[nextIdx];
+      this.pipSyncState.activeIdx = nextIdx;
+      this.pipSyncState.bothReachedAt = 0;
+
+      // Release 3D mocap barrier to the next keypoint
+      if (this.viewer) {
+        this.viewer.setKeyframeBarrier(nextSeg.next_mocap_arrive_time);
+      }
+
+      // Advance uploaded video to the next keypoint
+      this.pipVideo.playbackRate = viewerSpeed;
+      if (Math.abs(this.pipVideo.currentTime - nextSeg.teacher_time) > 0.2) {
+        this.seekPipVideoOnce(nextSeg.teacher_time, true);
+      }
+      if (nextSeg.next_teacher_time > nextSeg.teacher_time + 0.02) {
+        this.pipVideo.play().catch(() => {});
+      }
+    } else {
+      // Both have completed the final keyframe segment
+      const isLoop = this.btnLoop && this.btnLoop.classList.contains('active');
+      if (isLoop) {
+        const firstSeg = this.processedKeyposeSync[0];
+        this.pipSyncState.activeIdx = 0;
+        this.pipSyncState.bothReachedAt = 0;
+        if (this.viewer) {
+          this.viewer.setKeyframeBarrier(firstSeg.next_mocap_arrive_time);
+          this.viewer.seek(firstSeg.mocap_arrive_time);
+        }
+        this.seekPipVideoOnce(firstSeg.teacher_time, true);
+        this.pipVideo.playbackRate = viewerSpeed;
+        if (firstSeg.next_teacher_time > firstSeg.teacher_time + 0.02) {
+          this.pipVideo.play().catch(() => {});
+        }
+      } else {
+        if (this.viewer) {
+          this.viewer.setKeyframeBarrier(null);
+          this.viewer.pause();
+        }
+        if (!this.pipVideo.paused) {
+          this.pipVideo.pause();
+        }
+        this.updatePlayButtonState(false);
+        if (this.pipKeyposeStatus) {
+          this.pipKeyposeStatus.textContent = `✓ All ${total} Keyframes Completed`;
+        }
+      }
     }
   }
 
@@ -1661,18 +2238,15 @@ class App {
     this.updatePlayButtonState(isPlaying);
 
     if (this.pipVideo) {
+      const currentMocapTime = this.viewer.activeAction
+        ? this.viewer.activeAction.time % (this.viewer.duration || 1)
+        : 0;
+      this.pipSyncState = { activeIdx: -1, phase: 'idle', lastSeekTarget: -1 };
       if (isPlaying) {
-        if (this.viewer.activeAction) {
-          const targetTime = this.viewer.activeAction.time % (this.viewer.duration || 1);
-          try {
-            this.pipVideo.currentTime = targetTime;
-          } catch (_) {}
-        }
-        if (this.videoPanel && this.videoPanel.style.display !== 'none') {
-          this.pipVideo.play().catch(() => {});
-        }
+        this.syncPipVideoWithMocap(currentMocapTime, true, true);
       } else {
         this.pipVideo.pause();
+        this.syncPipVideoWithMocap(currentMocapTime, false, true);
       }
     }
   }
