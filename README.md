@@ -4,6 +4,8 @@ An AI-powered motion capture and interactive pose-copying training studio for ma
 
 Built for **DevFest Hackathon 2026**.
 
+The MotionLearn product frontend lives in `final-web-app/`. See the [MotionLearn runbook](deploy/README.md) for the product's local setup and Compute Engine deployment. The quick start below opens the original testing UI.
+
 ---
 
 ## 🥋 Key Features

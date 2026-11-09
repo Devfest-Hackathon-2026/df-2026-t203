@@ -20,6 +20,9 @@ web_app/teacher_videos/*.mp4
 web_app/teacher_videos/*_dl.*
 web_app/teacher_videos/*_raw.*
 Motion_Capture/output/
+.motionlearn-data/
+web_app/recordings_data/*.feedback.json
+web_app/recordings_data/.take-*/
 
 
 # 秘密情報（コミットしない）

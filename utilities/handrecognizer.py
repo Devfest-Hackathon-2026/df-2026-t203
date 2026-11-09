@@ -2,10 +2,11 @@ import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 import cv2
+import os
 from pathlib import Path
 
 
-GESTURE_MODEL_PATH = (
+GESTURE_MODEL_PATH = Path(os.environ["MOTIONLEARN_GESTURE_MODEL"]) if "MOTIONLEARN_GESTURE_MODEL" in os.environ else (
     Path(__file__).resolve().parents[1]
     / "youtube_extension"
     / "gesture_recognizer.task"
