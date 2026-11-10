@@ -120,7 +120,8 @@ class Take:
                 if joints:
                     following = segment.feedback[position + 1][0] if position + 1 < len(segment.feedback) else segment.frames
                     end = min(following, index + FPS // 4)
-                    feedback.append({"start": (offset + index) / FPS, "end": (offset + end) / FPS, "joints": joints})
+                    if end > index:
+                        feedback.append({"start": (offset + index) / FPS, "end": (offset + end) / FPS, "joints": joints})
             offset += segment.frames
         encoded.replace(output)
         return sync, feedback, duration
@@ -233,23 +234,30 @@ class BrowserTraining:
         if world is None:
             self.hold = 0
             self.score = None
-            return [], []
+            return [], [], []
         if self.state == "PLAYING":
             self.transition.append(self.pipeline.serialize_pose(world))
-            return [], []
+            return [], [], []
 
         key = str(self.pose)
         angles, _ = self.pipeline.human_analysis(world)
-        score, worst = calculate_pose_match_score(self.targets[key], angles, self.pipeline.joint_weights)
+        score, errors = calculate_pose_match_score(self.targets[key], angles, self.pipeline.joint_weights, limit=None)
         if score is None or not math.isfinite(score):
             self.hold = 0
             self.score = None
-            return [], []
+            return [], [], []
         self.score = float(score if self.score is None else SCORE_EMA_ALPHA * score + (1 - SCORE_EMA_ALPHA) * self.score)
         self.hold, _ = update_hold_progress(self.score, self.hold)
-        mistakes = [{"id": joint, "degrees": round(float(error), 1)} for joint, error in worst if error >= JOINT_DEADZONE]
+        review_errors = [
+            {"id": joint, "degrees": float(error)}
+            for joint, error in errors if joint in self.pipeline.joint_bone
+        ]
+        mistakes = [
+            {"id": joint, "degrees": round(float(error), 1)}
+            for joint, error in errors[:2] if error >= JOINT_DEADZONE
+        ]
         if not mistakes or screen is None:
-            return mistakes, []
+            return mistakes, [], review_errors
         normalized, transform = self.pipeline.normalize_pose(world)
         screen_pose, screen_transform = self.pipeline.normalize_pose(screen)
         corrections = self.pipeline.euclidean_distance(
@@ -264,7 +272,7 @@ class BrowserTraining:
                 x, y = item["start_point"]
                 u, v = item["end_point"]
                 arrows.append({"start": [float(x) / width, float(y) / height], "end": [float(u) / width, float(v) / height]})
-        return mistakes, arrows
+        return mistakes, arrows, review_errors
 
     async def frame(self, payload):
         mistakes, arrows = [], []
@@ -283,9 +291,9 @@ class BrowserTraining:
                     paused = self.state == "PAUSED"
                     if paused:
                         segment.sync.setdefault(self.pose, {"arrive": index})
-                    mistakes, arrows = await asyncio.to_thread(self.assess, frame)
+                    mistakes, arrows, review_errors = await asyncio.to_thread(self.assess, frame)
                     if paused:
-                        segment.feedback.append((index, mistakes))
+                        segment.feedback.append((index, review_errors))
                     if self.hold >= REQUIRED_HOLD_FRAMES:
                         done = await self.advance()
                         mistakes, arrows = [], []

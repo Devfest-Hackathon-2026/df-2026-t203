@@ -3,12 +3,35 @@
 from pathlib import Path
 import shutil
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 import unittest
 
 import cv2
 import numpy as np
 
-from browser_training import FPS, Take
+from browser_training import BrowserTraining, FPS, Take
+
+
+class PoseFeedbackTest(unittest.TestCase):
+    def test_review_keeps_all_measured_joints_while_live_feedback_keeps_two(self):
+        joints = ["L_armpit", "R_elbow", "L_knee", "hip_tilt"]
+        session = BrowserTraining.__new__(BrowserTraining)
+        session.pipeline = SimpleNamespace(
+            mark_frame=lambda *args, **kwargs: (None, None, None, object()),
+            human_analysis=lambda world: (dict(zip(joints, [40, 35, 30, 5])), None),
+            joint_weights={},
+            joint_bone=dict.fromkeys(joints),
+        )
+        session.targets = {"0": dict.fromkeys(joints, 0)}
+        session.pose = 0
+        session.state = "PAUSED"
+        session.score = None
+        session.hold = 0
+
+        live, arrows, review = session.assess(None)
+        self.assertEqual([item["id"] for item in live], joints[:2])
+        self.assertEqual(arrows, [])
+        self.assertEqual([item["id"] for item in review], joints)
 
 
 @unittest.skipUnless(shutil.which("ffmpeg"), "FFmpeg is required to verify the final MP4")

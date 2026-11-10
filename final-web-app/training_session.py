@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import math
 from pathlib import Path
 import shutil
 import socket
@@ -65,7 +66,9 @@ def encode_opencv_frame(frame) -> str | None:
     return base64.b64encode(encoded.tobytes()).decode("ascii")
 
 
-def calculate_pose_match_score(target_angles: dict, student_angles: dict, joint_weights: dict):
+def calculate_pose_match_score(
+    target_angles: dict, student_angles: dict, joint_weights: dict, *, limit: int | None = 2,
+):
     weighted_error = 0.0
     total_weight = 0.0
     joint_errors = []
@@ -76,6 +79,8 @@ def calculate_pose_match_score(target_angles: dict, student_angles: dict, joint_
             continue
 
         raw_diff = abs(target_angle - student_angle)
+        if not math.isfinite(raw_diff):
+            continue
         adjusted_diff = 0.0 if raw_diff < JOINT_DEADZONE else raw_diff
         weight = joint_weights.get(joint, 1.0)
 
@@ -87,7 +92,7 @@ def calculate_pose_match_score(target_angles: dict, student_angles: dict, joint_
         return None, []
 
     joint_errors.sort(key=lambda item: item[1], reverse=True)
-    return weighted_error / total_weight, joint_errors[:2]
+    return weighted_error / total_weight, joint_errors[:limit]
 
 
 def update_hold_progress(smoothed_score: float, match_hold_frames: int):
