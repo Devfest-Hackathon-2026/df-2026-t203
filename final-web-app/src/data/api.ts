@@ -31,6 +31,7 @@ export interface Recording {
   is_processed?: boolean
   output_dir_name: string
   glb_filename?: string
+  mocap_mirrored?: boolean
   blend_filename?: string
   fbx_filename?: string
   teacher_video_filename?: string
