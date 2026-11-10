@@ -37,7 +37,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=dependencies /opt /opt
 COPY --from=frontend /usr/local/bin/node /usr/local/bin/node
 WORKDIR /app
-COPY web_app/ web_app/
+COPY final-web-app/ final-web-app/
 COPY utilities/ utilities/
 COPY Motion_Capture/ Motion_Capture/
 COPY ["pose_landmarker_full.task", "Y Bot.fbx", "Dojo.glb", "./"]
@@ -55,6 +55,6 @@ RUN install -d -o motionlearn -g motionlearn /data \
     && /opt/landmarks/bin/python -c 'import mediapipe as mp; assert hasattr(mp, "solutions")' \
     && /opt/skellyforge/bin/python -c 'import skellyforge'
 USER motionlearn
-RUN /opt/api/bin/python -c 'import sys; sys.path.insert(0, "web_app"); import app'
+RUN /opt/api/bin/python -c 'import sys; sys.path.insert(0, "final-web-app"); import app'
 EXPOSE 8000
-CMD ["python", "web_app/run_server.py"]
+CMD ["python", "final-web-app/run_server.py"]

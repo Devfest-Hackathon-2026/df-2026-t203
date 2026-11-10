@@ -8,8 +8,10 @@ import uvicorn
 HERE = Path(__file__).resolve().parent
 WORKSPACE_DIR = HERE.parent
 
-# Ensure the app directory is in sys.path
+# Ensure the app and workspace directories are in sys.path
 sys.path.insert(0, str(HERE))
+if str(WORKSPACE_DIR) not in sys.path:
+    sys.path.insert(0, str(WORKSPACE_DIR))
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
