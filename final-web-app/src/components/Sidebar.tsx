@@ -7,6 +7,7 @@ interface Props {
   selected: string | null
   onTeacher?: (teacher: Teacher) => void
   onRecording: (recording: Recording) => void
+  onDeleteRecording: (recording: Recording) => Promise<void>
   onUpload: (file: File) => Promise<void>
   onYouTube?: (url: string) => Promise<void>
   disabled?: boolean
@@ -19,6 +20,7 @@ export default function Sidebar({
   selected,
   onTeacher,
   onRecording,
+  onDeleteRecording,
   onUpload,
   onYouTube,
   disabled,
@@ -29,6 +31,8 @@ export default function Sidebar({
   const [youtube, setYoutube] = useState(false)
   const [url, setUrl] = useState('')
   const [busy, setBusy] = useState(false)
+  const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
+  const [deleting, setDeleting] = useState(false)
   const [error, setError] = useState('')
   const [closedFolders, setClosedFolders] = useState<Record<string, boolean>>({})
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -52,16 +56,64 @@ export default function Sidebar({
     }
   }
 
+  const confirmDelete = async (recording: Recording) => {
+    setDeleting(true)
+    setError('')
+    try {
+      await onDeleteRecording(recording)
+      setDeleteTarget(null)
+    } catch (err) {
+      setError((err as Error).message)
+    } finally {
+      setDeleting(false)
+    }
+  }
+
   const renderRecording = (recording: Recording) => (
     <li key={recording.id}>
-      <button
-        disabled={disabled}
-        onClick={() => onRecording(recording)}
-        aria-current={selected === recording.id ? 'true' : undefined}
-        className="w-full py-1 text-left text-sm text-cream/80 transition hover:text-acid aria-[current=true]: font-medium aria-[current=true]:text-amber disabled:opacity-50"
-      >
-        {recording.title}
-      </button>
+      <div className="flex items-start gap-2">
+        <button
+          type="button"
+          disabled={disabled}
+          onClick={() => onRecording(recording)}
+          aria-current={selected === recording.id ? 'true' : undefined}
+          className="min-w-0 flex-1 py-1 text-left text-sm text-cream/80 transition hover:text-acid aria-[current=true]:font-medium aria-[current=true]:text-amber disabled:opacity-50"
+        >
+          {recording.title}
+        </button>
+        <button
+          type="button"
+          disabled={disabled || deleting || recording.status === 'processing'}
+          aria-label={`Delete ${recording.title}`}
+          aria-expanded={deleteTarget === recording.id}
+          title={recording.status === 'processing' ? 'Recording is processing' : 'Delete recording'}
+          onClick={() => {
+            setError('')
+            setDeleteTarget(deleteTarget === recording.id ? null : recording.id)
+          }}
+          className="shrink-0 px-1 py-1.5 text-xs text-red-300 hover:text-red-100 disabled:opacity-50"
+        >
+          Delete
+        </button>
+      </div>
+      {deleteTarget === recording.id && (
+        <div role="group" aria-label={`Confirm deletion of ${recording.title}`} className="mt-1 space-y-2 border border-edge bg-ink/80 p-2 text-xs">
+          <p className="text-cream/80">Permanently delete this recording and its generated files?</p>
+          <div className="flex flex-wrap gap-2">
+            <button type="button" disabled={deleting} onClick={() => setDeleteTarget(null)} className="text-cream hover:text-acid disabled:opacity-50">
+              Cancel
+            </button>
+            <button
+              type="button"
+              disabled={disabled || deleting || recording.status === 'processing'}
+              onClick={() => void confirmDelete(recording)}
+              className="font-medium text-red-300 hover:text-red-100 disabled:opacity-50"
+            >
+              {deleting ? 'Deleting…' : 'Delete permanently'}
+            </button>
+          </div>
+        </div>
+      )}
     </li>
   )
 

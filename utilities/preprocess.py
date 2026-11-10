@@ -7,6 +7,7 @@ import cv2
 import numpy as np
 from utilities.video_mediapipeline import get_pose_difference, normalize_3d_landmarks, human_analysis
 from utilities.mediapipeline import MedaiPipeline
+from utilities.keyposes import JOINT_WEIGHTS, keypose_indices, normalize_energy
 from scipy.ndimage import gaussian_filter1d
 
 def generate_keyposes(video_name:str, output_path:str = "keyposes/teacher_keyposes.json", output_path_time:str = "keyposes/teacher_timestamps.json") -> None:
@@ -107,8 +108,6 @@ def generate_keyposes_new(video_name:str, output_path:str = "keyposes/teacher_ke
     :param frame_skip: Process every Nth frame for speed (default 2). Set to 1 to process all frames.
     :type frame_skip: int
     """
-    from scipy.signal import find_peaks, argrelextrema
-
     pipeline = MedaiPipeline(enable_ble=False, ema_alpha=0.4)  # No BLE needed for preprocessing
     cap = cv2.VideoCapture(video_name)
 
@@ -117,52 +116,10 @@ def generate_keyposes_new(video_name:str, output_path:str = "keyposes/teacher_ke
     print("Processing video")
     frame_times = {}
 
-    #thresholds:
-    prominence = 0.08
-    min_peak_distance_multiplier= 0.15
-    min_keyframe_distance_multiplier = 0.2
-
-
     raw_joints_list = []
     raw_angles_list = []
     valid_frame_ids = []
     last_valid_angles = {}
-
-    joint_weights = np.array([
-        0.1,  # 0  - nose
-        0.0,  # 1  - left eye (inner)
-        0.0,  # 2  - left eye
-        0.0,  # 3  - left eye (outer)
-        0.0,  # 4  - right eye (inner)
-        0.0,  # 5  - right eye
-        0.0,  # 6  - right eye (outer)
-        0.0,  # 7  - left ear
-        0.0,  # 8  - right ear
-        0.0,  # 9  - mouth (left)
-        0.0,  # 10 - mouth (right)
-        1.5,  # 11 - left shoulder
-        1.5,  # 12 - right shoulder
-        1.2,  # 13 - left elbow
-        1.2,  # 14 - right elbow
-        1.4,  # 15 - left wrist
-        1.4,  # 16 - right wrist
-        0.3,  # 17 - left pinky
-        0.3,  # 18 - right pinky
-        0.3,  # 19 - left index
-        0.3,  # 20 - right index
-        0.3,  # 21 - left thumb
-        0.3,  # 22 - right thumb
-        1.5,  # 23 - left hip
-        1.5,  # 24 - right hip
-        1.2,  # 25 - left knee
-        1.2,  # 26 - right knee
-        1.2,  # 27 - left ankle
-        1.2,  # 28 - right ankle
-        0.5,  # 29 - left heel
-        0.5,  # 30 - right heel
-        0.3,  # 31 - left foot index
-        0.3,  # 32 - right foot index
-    ])
 
     process_counter = 0
 
@@ -223,8 +180,8 @@ def generate_keyposes_new(video_name:str, output_path:str = "keyposes/teacher_ke
     xyz_differences = np.diff(joints_array, axis=0)            
     joint_distances = np.linalg.norm(xyz_differences, axis=2)   # (N-1, 33)
     # Apply per-joint weights so that shoulders/hips/knees matter more than face
-    weighted_distances = joint_distances * joint_weights[np.newaxis, :]
-    vJ = weighted_distances.sum(axis=1) / joint_weights.sum()   # weighted mean
+    weighted_distances = joint_distances * JOINT_WEIGHTS[np.newaxis, :]
+    vJ = weighted_distances.sum(axis=1) / JOINT_WEIGHTS.sum()   # weighted mean
 
     # Angular velocity
     angle_differences = np.diff(angles_array, axis=0)
@@ -238,89 +195,17 @@ def generate_keyposes_new(video_name:str, output_path:str = "keyposes/teacher_ke
 
     print("Gaussian smoothing done")
 
-    # normalize
-    def safe_normalize(arr):
-        min_val, max_val = arr.min(), arr.max()
-        range_val = max_val - min_val
-        if range_val < 1e-9:
-            return np.zeros_like(arr)
-        return (arr - min_val) / range_val
-
-    finalVJ = safe_normalize(filtered_vJ)
-    finalVT = safe_normalize(filtered_vT)
-
-    print("Normalization done")
-
-    # --- Calculate combined energy ---
-    wT = 0.4  # angular velocity weight (less noisy)
-    wJ = 0.6  # translational velocity weight (more informative for full-body movement)
-    Energy = (wT * finalVT) + (wJ * finalVJ)
-
-    # --- Peak-then-valley keypose detection ---
-    # Step 1: Find peaks in the energy signal (moments of maximum movement).
-    #         `prominence` ensures we only pick peaks that stand out significantly
-    #         above their surrounding baseline, filtering out minor jitter.
-    #         `distance` enforces a minimum gap between peaks (in frames).
-    # Re-open briefly just to get FPS since we released cap above
+    # Combine angular and translational motion before finding held poses.
+    energy = 0.4 * normalize_energy(filtered_vT) + 0.6 * normalize_energy(filtered_vJ)
     cap_info = cv2.VideoCapture(video_name)
     fps = cap_info.get(cv2.CAP_PROP_FPS)
     cap_info.release()
-    if fps <= 0:
-        fps = 30.0
-    effective_fps = fps / frame_skip
-    min_peak_distance = max(int(effective_fps * min_peak_distance_multiplier), 2)  # at least 0.15 seconds apart
+    effective_fps = (fps if fps > 0 else 30.0) / frame_skip
+    keyframe_actual_indices = keypose_indices(energy, effective_fps)
 
-    peaks, peak_props = find_peaks(Energy, prominence=prominence, distance=min_peak_distance)
-    print(f"Found {len(peaks)} movement peaks")
-
-    # For each peak, find the nearest local minimum after it.
-    all_minima = argrelextrema(Energy, np.less, order=max(int(effective_fps * 0.15), 2))[0]
-    all_minima_set = set(all_minima)
-
-    keyframes = []
-    min_keyframe_distance = max(int(effective_fps * min_keyframe_distance_multiplier), 3)  # minimum gap between keyposes
-
-    for peak_idx in peaks:
-        # Find the first local minimum after this peak
-        best_valley = None
-        for m in sorted(all_minima):
-            if m > peak_idx:
-                best_valley = m
-                break
-
-        if best_valley is None:
-            best_valley = peak_idx
-
-        if keyframes and (best_valley - keyframes[-1]) < min_keyframe_distance:
-            continue
-
-        # Bounds check: np.diff reduces length by 1, so valid indices are [0, len(Energy)-1]
-        # Energy[i] represents the transition between valid_frame_ids[i] and valid_frame_ids[i+1]
-        # The keypose is the frame AFTER the transition, so use i+1
-        pose_index = best_valley + 1  # Off-by-one fix for np.diff
-        if pose_index < len(valid_frame_ids):
-            keyframes.append(best_valley)
-
-    # Always include the very first frame as keypose 0 (initial stance)
-    if keyframes and keyframes[0] != 0:
-        keyframes.insert(0, 0)
-    elif not keyframes and len(valid_frame_ids) > 0:
-        keyframes = [0]
-
-    print(f"Selected {len(keyframes)} keyposes")
-
-    # --- Build output dictionaries ---
     timestamps = {}
     keyposes = {}
-    # AI GENERATED START — teacher trajectory saving for DTW scoring
-    # Map keyframe energy indices to actual frame indices in valid_frame_ids
-    keyframe_actual_indices = []
-    for key in keyframes:
-        pose_frame_idx = min(key + 1, len(valid_frame_ids) - 1)
-        keyframe_actual_indices.append(pose_frame_idx)
-
-    for idx, key in enumerate(keyframes):
-        pose_frame_idx = keyframe_actual_indices[idx]
+    for idx, pose_frame_idx in enumerate(keyframe_actual_indices):
         actual_frame_id = valid_frame_ids[pose_frame_idx]
         timestamps[idx] = frame_times[actual_frame_id]
         keyposes[idx] = joints[str(actual_frame_id)]
@@ -358,8 +243,7 @@ def generate_keyposes_new(video_name:str, output_path:str = "keyposes/teacher_ke
 
     print("Saving keyframe images...")
     cap2 = cv2.VideoCapture(video_name)
-    for idx, key in enumerate(keyframes):
-        pose_frame_idx = min(key + 1, len(valid_frame_ids) - 1)
+    for idx, pose_frame_idx in enumerate(keyframe_actual_indices):
         actual_frame_id = valid_frame_ids[pose_frame_idx]
         cap2.set(cv2.CAP_PROP_POS_FRAMES, int(actual_frame_id) - 1)
         ret, frame = cap2.read()

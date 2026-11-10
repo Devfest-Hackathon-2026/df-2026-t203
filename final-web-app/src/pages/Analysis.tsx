@@ -3,6 +3,7 @@ import { useSearchParams } from 'react-router-dom'
 import PageBackground from '../components/PageBackground'
 import RigViewer from '../components/RigViewer'
 import Sidebar from '../components/Sidebar'
+import { useAnalysisPlayback, type Checkpoint } from '../data/useAnalysisPlayback'
 import {
   outputUrl,
   post,
@@ -11,68 +12,25 @@ import {
   teacherUrl,
   upload,
   useLibrary,
-  type KeyposeSync,
   type Recording,
 } from '../data/api'
 
-function normalizeKeyposeSegments(
-  rawSync: KeyposeSync[] | undefined,
-  mocapDuration: number,
-  teacherDuration: number,
-): KeyposeSync[] {
-  if (!rawSync || rawSync.length === 0) return []
-  const dur = Math.max(1.0, mocapDuration || 15.0)
-  const lastNextArrive = Number(rawSync[rawSync.length - 1].next_mocap_arrive_time || dur)
-  const scale = lastNextArrive > 0.1 ? dur / lastNextArrive : 1.0
-
-  return rawSync.map((item, idx) => {
-    const arrive = Number(item.mocap_arrive_time || 0) * scale
-    const nextArrive =
-      idx + 1 === rawSync.length
-        ? dur
-        : Number(item.next_mocap_arrive_time || dur) * scale
-    const tCur = Number(item.teacher_time || 0)
-    let tNxt = Number(item.next_teacher_time ?? tCur)
-    if (idx + 1 === rawSync.length && tNxt <= tCur) {
-      tNxt = teacherDuration > tCur ? teacherDuration : tCur + 1.0
-    }
-    return {
-      teacher_time: tCur,
-      mocap_arrive_time: arrive,
-      mocap_match_time: Number(item.mocap_match_time || arrive) * scale,
-      next_teacher_time: tNxt,
-      next_mocap_arrive_time: Math.max(arrive + 0.1, nextArrive),
-    }
-  })
-}
-
-function getSegmentIndexForTime(segments: KeyposeSync[], time: number): number {
-  if (segments.length === 0) return 0
-  for (let i = 0; i < segments.length; i += 1) {
-    const seg = segments[i]
-    if (
-      time >= seg.mocap_arrive_time - 0.001 &&
-      (time < seg.next_mocap_arrive_time - 0.001 || i === segments.length - 1)
-    ) {
-      return i
-    }
+function playbackCheckpoints(pairs: [number, number][], videoDuration: number, rigDuration: number) {
+  const checkpoints: Checkpoint[] = []
+  if (!videoDuration || !rigDuration) return checkpoints
+  for (const [videoTime, rigTime] of pairs) {
+    if (!Number.isFinite(videoTime) || videoTime < 0 || !Number.isFinite(rigTime) || rigTime < 0) continue
+    // Allow a small difference between source and exported animation lengths.
+    if (videoTime > videoDuration + 0.25 || rigTime > rigDuration + 0.25) continue
+    const pose = { videoTime: Math.min(videoTime, videoDuration), rigTime: Math.min(rigTime, rigDuration) }
+    const previous = checkpoints[checkpoints.length - 1]
+    if (previous && (
+      pose.rigTime < previous.rigTime || pose.videoTime < previous.videoTime ||
+      (pose.rigTime === previous.rigTime && pose.videoTime === previous.videoTime)
+    )) continue
+    checkpoints.push(pose)
   }
-  return 0
-}
-
-function snapToNearestKeyframe(segments: KeyposeSync[], rawTime: number): number {
-  if (segments.length === 0) return rawTime
-  let best = segments[0].mocap_arrive_time
-  let bestDist = Math.abs(rawTime - best)
-  for (let i = 1; i < segments.length; i += 1) {
-    const candidate = segments[i].mocap_arrive_time
-    const dist = Math.abs(rawTime - candidate)
-    if (dist < bestDist) {
-      bestDist = dist
-      best = candidate
-    }
-  }
-  return best
+  return checkpoints
 }
 
 function Review({
@@ -84,54 +42,62 @@ function Review({
   teacherFilename?: string
   refresh: () => Promise<void>
 }) {
-  const cleanVideoRef = useRef<HTMLVideoElement>(null)
-  const teacherVideoRef = useRef<HTMLVideoElement>(null)
-
+  const videoRef = useRef<HTMLVideoElement>(null)
   const canCompare = Boolean(teacherFilename && recording.video_id !== 'misc_mocap')
   const [view, setView] = useState<'teacher' | 'clean'>(canCompare ? 'teacher' : 'clean')
   const comparing = view === 'teacher' && canCompare
-
-  const [time, setTime] = useState(0)
-  const [cleanDuration, setCleanDuration] = useState(0)
-  const [rigDuration, setRigDuration] = useState(0)
-  const [teacherDuration, setTeacherDuration] = useState(0)
-  const [playing, setPlaying] = useState(false)
+  const videoSource = comparing && teacherFilename ? teacherUrl(teacherFilename) : recordingUrl(recording.filename)
+  const rigSource = (recording.status === 'completed' || recording.is_processed) && recording.glb_filename
+    ? outputUrl(recording, recording.glb_filename)
+    : ''
+  const [videoMetadata, setVideoMetadata] = useState({ source: '', duration: 0 })
+  const [rigMetadata, setRigMetadata] = useState({ source: '', duration: 0 })
+  const [cleanTimings, setCleanTimings] = useState<{ key: string; times: number[] } | null>(null)
   const [looping, setLooping] = useState(true)
   const [speed, setSpeed] = useState(1.0)
-  const [keyframeStatus, setKeyframeStatus] = useState('')
-  const [activeKeyframeIdx, setActiveKeyframeIdx] = useState(0)
-
   const [stage, setStage] = useState('')
   const [logs, setLogs] = useState<string[]>([])
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
 
-  const duration = rigDuration || cleanDuration || 15.0
-  const segments = useMemo(
-    () => normalizeKeyposeSegments(recording.keypose_sync, duration, teacherDuration),
-    [recording.keypose_sync, duration, teacherDuration],
-  )
-
+  const videoDuration = videoMetadata.source === videoSource ? videoMetadata.duration : 0
+  const rigLoaded = rigMetadata.source === rigSource
+  const rigDuration = rigLoaded ? rigMetadata.duration : 0
+  const duration = comparing ? rigDuration : videoDuration
   const base = `/api/recordings/${encodeURIComponent(recording.id)}`
 
-  // Mutable state for the 60fps mutual keyframe barrier loop
-  const syncStateRef = useRef({
-    time: 0,
-    activeIdx: 0,
-    bothReachedAt: 0,
-    lastFrameTs: 0,
+  // The library polls periodically. Equivalent timing data must keep the current playback session.
+  const matchData = useMemo(() => JSON.stringify(
+    (recording.keypose_sync ?? []).map((pose) => [pose.teacher_time, pose.mocap_match_time]),
+  ), [recording.keypose_sync])
+  const cleanTimingKey = JSON.stringify([rigSource, recording.status, matchData])
+  const cleanTimes = !comparing && cleanTimings?.key === cleanTimingKey ? cleanTimings.times : null
+  const checkpoints = useMemo(() => playbackCheckpoints(
+    comparing ? JSON.parse(matchData) : (cleanTimes ?? []).map((time) => [time, time]),
+    videoDuration,
+    rigDuration,
+  ), [cleanTimes, comparing, matchData, rigDuration, videoDuration])
+  const enabled = videoDuration > 0 && (
+    comparing ? rigDuration > 0 : !rigSource || (rigLoaded && (!rigDuration || cleanTimes !== null))
+  )
+  const playback = useAnalysisPlayback({
+    videoRef, source: videoSource, comparing, duration, videoDuration, checkpoints, enabled,
+    speed, looping, onError: setError,
   })
-  useEffect(() => {
-    syncStateRef.current.time = time
-  }, [time])
+  const { time, playing, status: keyposeStatus } = playback
+  const noKeyposes = enabled && rigDuration > 0 && checkpoints.length === 0
 
   useEffect(() => {
-    setView(canCompare ? 'teacher' : 'clean')
-    setTime(0)
-    setPlaying(false)
-    setActiveKeyframeIdx(0)
-    syncStateRef.current = { time: 0, activeIdx: 0, bothReachedAt: 0, lastFrameTs: 0 }
-  }, [recording.id, canCompare])
+    if (!rigSource || recording.status === 'processing') return
+    const controller = new AbortController()
+    const storeTimes = (times: number[]) => {
+      if (!controller.signal.aborted) setCleanTimings({ key: cleanTimingKey, times })
+    }
+    void request<number[]>(`${base}/keyposes`, { signal: controller.signal })
+      .then(storeTimes)
+      .catch(() => storeTimes([]))
+    return () => controller.abort()
+  }, [base, cleanTimingKey, recording.status, rigSource])
 
   useEffect(() => {
     if (recording.status !== 'processing') return
@@ -162,223 +128,6 @@ function Review({
     }
   }, [base, recording.status, refresh])
 
-  // Seek helper for both videos and 3D mocap clock
-  const seekToMocapTime = (nextTime: number, snapToKeypose = false) => {
-    const clamped = Math.max(0, Math.min(duration, nextTime))
-    const finalTime =
-      comparing && snapToKeypose && segments.length > 0
-        ? snapToNearestKeyframe(segments, clamped)
-        : clamped
-
-    setTime(finalTime)
-    syncStateRef.current.time = finalTime
-    syncStateRef.current.bothReachedAt = 0
-
-    if (cleanVideoRef.current && Math.abs(cleanVideoRef.current.currentTime - finalTime) > 0.03) {
-      try {
-        cleanVideoRef.current.currentTime = finalTime
-      } catch {}
-    }
-
-    if (comparing && segments.length > 0) {
-      const idx = getSegmentIndexForTime(segments, finalTime)
-      const seg = segments[idx]
-      syncStateRef.current.activeIdx = idx
-      setActiveKeyframeIdx(idx)
-      if (teacherVideoRef.current && teacherVideoRef.current.readyState >= 1) {
-        try {
-          teacherVideoRef.current.currentTime = seg.teacher_time
-        } catch {}
-      }
-      setKeyframeStatus(
-        `⏸ Keyframe #${idx + 1}/${segments.length} (${seg.teacher_time.toFixed(1)}s)`,
-      )
-    }
-  }
-
-  const stepKeyframe = (delta: number) => {
-    if (segments.length === 0) return
-    const curIdx = syncStateRef.current.activeIdx
-    const nextIdx = Math.max(0, Math.min(segments.length - 1, curIdx + delta))
-    const targetSeg = segments[nextIdx]
-    syncStateRef.current.activeIdx = nextIdx
-    setActiveKeyframeIdx(nextIdx)
-    seekToMocapTime(targetSeg.mocap_arrive_time, false)
-  }
-
-  // Mutual Keyframe Barrier Synchronization Loop
-  useEffect(() => {
-    if (!comparing) {
-      setKeyframeStatus('')
-      return
-    }
-    const teacherEl = teacherVideoRef.current
-    if (!teacherEl || segments.length === 0) return
-
-    if (!playing) {
-      if (!teacherEl.paused) teacherEl.pause()
-      const idx = getSegmentIndexForTime(segments, syncStateRef.current.time)
-      const seg = segments[idx]
-      setActiveKeyframeIdx(idx)
-      setKeyframeStatus(
-        `⏸ Keyframe #${idx + 1}/${segments.length} (${seg.teacher_time.toFixed(1)}s) — Paused at Keyframe`,
-      )
-      return
-    }
-
-    // Initialize segment when starting playback
-    const startIdx = getSegmentIndexForTime(segments, syncStateRef.current.time)
-    const startSeg = segments[startIdx]
-    syncStateRef.current.activeIdx = startIdx
-    syncStateRef.current.bothReachedAt = 0
-    syncStateRef.current.lastFrameTs = performance.now()
-    setActiveKeyframeIdx(startIdx)
-
-    teacherEl.playbackRate = speed
-    if (
-      teacherEl.readyState >= 1 &&
-      (teacherEl.currentTime < startSeg.teacher_time - 0.1 ||
-        teacherEl.currentTime > startSeg.next_teacher_time + 0.1)
-    ) {
-      try {
-        teacherEl.currentTime = startSeg.teacher_time
-      } catch {}
-    }
-    if (startSeg.next_teacher_time > startSeg.teacher_time + 0.02 && teacherEl.paused) {
-      void teacherEl.play().catch(() => undefined)
-    }
-
-    let raf = 0
-    const tick = (now: number) => {
-      raf = requestAnimationFrame(tick)
-      const dt = Math.min(0.1, Math.max(0, (now - syncStateRef.current.lastFrameTs) / 1000))
-      syncStateRef.current.lastFrameTs = now
-
-      const total = segments.length
-      const activeIdx = Math.max(0, Math.min(total - 1, syncStateRef.current.activeIdx))
-      const seg = segments[activeIdx]
-      const nextKeyframeNum = Math.min(total, activeIdx + 2)
-
-      // Advance 3D mocap clock up to the current keyframe barrier (seg.next_mocap_arrive_time)
-      const nextMocapTime = Math.min(
-        seg.next_mocap_arrive_time,
-        syncStateRef.current.time + dt * speed,
-      )
-      syncStateRef.current.time = nextMocapTime
-      setTime(nextMocapTime)
-
-      const mocapReached = nextMocapTime >= seg.next_mocap_arrive_time - 0.015
-      const teacherSpan = Math.max(0, seg.next_teacher_time - seg.teacher_time)
-      const videoUnavailable = Boolean(teacherEl.error || teacherEl.readyState < 1)
-      const teacherReached =
-        videoUnavailable ||
-        teacherSpan <= 0.02 ||
-        teacherEl.currentTime >= seg.next_teacher_time - 0.025 ||
-        teacherEl.ended
-
-      if (teacherReached) {
-        if (!teacherEl.paused) teacherEl.pause()
-      } else {
-        if (Math.abs(teacherEl.playbackRate - speed) > 0.01) {
-          teacherEl.playbackRate = speed
-        }
-        if (teacherEl.paused && !teacherEl.seeking) {
-          void teacherEl.play().catch(() => undefined)
-        }
-      }
-
-      if (teacherReached && !mocapReached) {
-        syncStateRef.current.bothReachedAt = 0
-        setKeyframeStatus(
-          `⏸ Keyframe #${nextKeyframeNum}/${total} (${seg.next_teacher_time.toFixed(1)}s) — Video Waiting for 3D Mocap (${nextMocapTime.toFixed(1)}s / ${seg.next_mocap_arrive_time.toFixed(1)}s)`,
-        )
-        return
-      }
-
-      if (mocapReached && !teacherReached) {
-        syncStateRef.current.bothReachedAt = 0
-        setKeyframeStatus(
-          `⏸ Keyframe #${nextKeyframeNum}/${total} — 3D Mocap Waiting for Video (${teacherEl.currentTime.toFixed(1)}s / ${seg.next_teacher_time.toFixed(1)}s)`,
-        )
-        return
-      }
-
-      if (!mocapReached && !teacherReached) {
-        syncStateRef.current.bothReachedAt = 0
-        setKeyframeStatus(
-          `▶ Moving to Keyframe #${nextKeyframeNum}/${total} (Video ${teacherEl.currentTime.toFixed(1)}s/${seg.next_teacher_time.toFixed(1)}s • Mocap ${nextMocapTime.toFixed(1)}s/${seg.next_mocap_arrive_time.toFixed(1)}s)`,
-        )
-        return
-      }
-
-      // BOTH reached the next keypoint!
-      if (!syncStateRef.current.bothReachedAt) {
-        syncStateRef.current.bothReachedAt = now
-      }
-      setKeyframeStatus(`✓ Keyframe #${nextKeyframeNum}/${total} Reached by Both! Continuing...`)
-
-      if (now - syncStateRef.current.bothReachedAt < 200) {
-        return
-      }
-
-      if (activeIdx + 1 < total) {
-        const nextIdx = activeIdx + 1
-        const nextSeg = segments[nextIdx]
-        syncStateRef.current.activeIdx = nextIdx
-        syncStateRef.current.bothReachedAt = 0
-        setActiveKeyframeIdx(nextIdx)
-
-        teacherEl.playbackRate = speed
-        if (Math.abs(teacherEl.currentTime - nextSeg.teacher_time) > 0.2 && !teacherEl.seeking) {
-          try {
-            teacherEl.currentTime = nextSeg.teacher_time
-          } catch {}
-        }
-        if (nextSeg.next_teacher_time > nextSeg.teacher_time + 0.02) {
-          void teacherEl.play().catch(() => undefined)
-        }
-      } else if (looping) {
-        const firstSeg = segments[0]
-        syncStateRef.current.activeIdx = 0
-        syncStateRef.current.time = firstSeg.mocap_arrive_time
-        syncStateRef.current.bothReachedAt = 0
-        setActiveKeyframeIdx(0)
-        setTime(firstSeg.mocap_arrive_time)
-        try {
-          teacherEl.currentTime = firstSeg.teacher_time
-        } catch {}
-        teacherEl.playbackRate = speed
-        if (firstSeg.next_teacher_time > firstSeg.teacher_time + 0.02) {
-          void teacherEl.play().catch(() => undefined)
-        }
-      } else {
-        if (!teacherEl.paused) teacherEl.pause()
-        setPlaying(false)
-        setKeyframeStatus(`✓ All ${total} Keyframes Completed`)
-      }
-    }
-
-    raf = requestAnimationFrame(tick)
-    return () => {
-      cancelAnimationFrame(raf)
-      teacherEl.pause()
-    }
-  }, [comparing, playing, segments, speed, looping])
-
-  // Clean recording playback sync when not in teacher-comparison mode
-  useEffect(() => {
-    if (comparing) return
-    const cleanEl = cleanVideoRef.current
-    if (!cleanEl) return
-    cleanEl.playbackRate = speed
-    cleanEl.loop = looping
-    if (playing) {
-      if (cleanEl.paused) void cleanEl.play().catch(() => undefined)
-    } else if (!cleanEl.paused) {
-      cleanEl.pause()
-    }
-  }, [comparing, playing, speed, looping])
-
   async function process() {
     setBusy(true)
     setError('')
@@ -392,32 +141,12 @@ function Review({
     }
   }
 
-  const togglePlay = () => {
-    if (comparing) {
-      setPlaying((prev) => !prev)
-    } else if (cleanVideoRef.current) {
-      if (cleanVideoRef.current.paused) {
-        void cleanVideoRef.current
-          .play()
-          .then(() => setPlaying(true))
-          .catch(() => setError('Playback could not start.'))
-      } else {
-        cleanVideoRef.current.pause()
-        setPlaying(false)
-      }
-    } else {
-      setPlaying((prev) => !prev)
-    }
-  }
-
   const files = [
     ['Clean MP4', recordingUrl(recording.filename)],
     ['GLB', recording.glb_filename && outputUrl(recording, recording.glb_filename)],
     ['FBX', recording.fbx_filename && outputUrl(recording, recording.fbx_filename)],
     ['Blender', recording.blend_filename && outputUrl(recording, recording.blend_filename)],
   ] as const
-
-  const hasRig = (recording.status === 'completed' || recording.is_processed) && Boolean(recording.glb_filename)
 
   return (
     <div className="flex w-full max-w-6xl flex-1 flex-col justify-between gap-4">
@@ -430,49 +159,28 @@ function Review({
           </span>
 
           <video
-            ref={cleanVideoRef}
-            src={recordingUrl(recording.filename)}
+            key={videoSource}
+            ref={videoRef}
+            src={videoSource}
             playsInline
-            preload="metadata"
+            preload="auto"
             muted={comparing}
-            className={`absolute inset-0 h-full w-full object-contain ${
-              comparing ? 'invisible' : ''
-            }`}
-            onLoadedMetadata={(event) => setCleanDuration(event.currentTarget.duration)}
-            onTimeUpdate={(event) => {
-              if (!comparing) setTime(event.currentTarget.currentTime)
+            className="absolute inset-0 h-full w-full object-contain"
+            onLoadedMetadata={(event) => {
+              const nextDuration = event.currentTarget.duration
+              if (Number.isFinite(nextDuration)) setVideoMetadata({ source: videoSource, duration: nextDuration })
             }}
-            onPlay={() => {
-              if (!comparing) setPlaying(true)
+            onError={() => {
+              playback.pause()
+              setVideoMetadata({ source: videoSource, duration: 0 })
+              setError(comparing ? 'The uploaded teacher video could not be loaded.' : 'The clean recording could not be loaded.')
+              if (comparing) setView('clean')
             }}
-            onPause={() => {
-              if (!comparing) setPlaying(false)
-            }}
-            onEnded={() => {
-              if (!comparing) setPlaying(false)
-            }}
-            onError={() => setError('The clean recording could not be loaded.')}
           />
 
-          {comparing && teacherFilename && (
-            <video
-              ref={teacherVideoRef}
-              src={teacherUrl(teacherFilename)}
-              muted
-              playsInline
-              preload="auto"
-              className="absolute inset-0 h-full w-full object-contain"
-              onLoadedMetadata={(event) => setTeacherDuration(event.currentTarget.duration)}
-              onError={() => {
-                setError('The uploaded teacher video could not be loaded.')
-                setView('clean')
-              }}
-            />
-          )}
-
-          {comparing && keyframeStatus && (
+          {(keyposeStatus || noKeyposes) && (
             <div className="pointer-events-none absolute inset-x-3 bottom-3 z-10 border border-edge bg-black/80 px-3 py-1.5 text-xs text-amber-glow">
-              {keyframeStatus}
+              {keyposeStatus || 'No key-pose timings available. Playing continuously.'}
             </div>
           )}
         </section>
@@ -483,12 +191,11 @@ function Review({
             3D USER RIG · {recording.title}
           </span>
 
-          {hasRig && recording.glb_filename ? (
+          {rigSource ? (
             <RigViewer
-              url={outputUrl(recording, recording.glb_filename)}
-              video={cleanVideoRef}
+              url={rigSource}
               mocapTime={time}
-              onDurationLoaded={(dur) => setRigDuration(dur)}
+              onDurationLoaded={(dur) => setRigMetadata({ source: rigSource, duration: dur })}
             />
           ) : (
             <div
@@ -533,8 +240,8 @@ function Review({
           <button
             type="button"
             className={`ctrl-btn ${playing ? 'active' : ''}`}
-            disabled={!duration}
-            onClick={togglePlay}
+            disabled={!enabled}
+            onClick={playback.toggle}
           >
             {playing ? 'Pause' : 'Play'}
           </button>
@@ -543,20 +250,17 @@ function Review({
             type="button"
             className="ctrl-btn"
             disabled={!duration}
-            onClick={() => {
-              setPlaying(false)
-              seekToMocapTime(0, false)
-            }}
+            onClick={() => playback.seek(0)}
           >
             Restart
           </button>
 
-          {comparing && segments.length > 0 && (
+          {checkpoints.length > 0 && (
             <>
               <button
                 type="button"
                 className="ctrl-btn"
-                onClick={() => stepKeyframe(-1)}
+                onClick={() => playback.step(-1)}
                 title="Previous Keyframe"
               >
                 Prev Keyframe
@@ -564,7 +268,7 @@ function Review({
               <button
                 type="button"
                 className="ctrl-btn"
-                onClick={() => stepKeyframe(1)}
+                onClick={() => playback.step(1)}
                 title="Next Keyframe"
               >
                 Next Keyframe
@@ -590,21 +294,16 @@ function Review({
             step="0.01"
             value={time}
             disabled={!duration}
-            onChange={(event) => {
-              const next = Number(event.target.value)
-              if (playing) setPlaying(false)
-              seekToMocapTime(next, true)
-            }}
+            onChange={(event) => playback.seek(Number(event.target.value), true)}
           />
           <datalist id="analysis-keyframe-datalist">
-            {segments.map((seg, i) => (
-              <option key={i} value={seg.mocap_arrive_time.toFixed(3)} label={`Keyframe ${i + 1}`} />
+            {checkpoints.map((pose, i) => (
+              <option key={i} value={pose.rigTime.toFixed(3)} label={`Keyframe ${i + 1}`} />
             ))}
           </datalist>
 
           <span className="stencil tabular-nums text-xs text-cream/80">
             {time.toFixed(1)}s / {duration.toFixed(1)}s
-            {comparing && segments.length > 0 && ` · KF ${activeKeyframeIdx + 1}/${segments.length}`}
           </span>
 
           <label className="stencil flex items-center gap-1.5 border border-edge bg-ink/80 px-2.5 py-1 text-xs text-cream/80">
@@ -630,7 +329,7 @@ function Review({
                 type="button"
                 className={`ctrl-btn ${comparing ? 'active' : ''}`}
                 onClick={() => {
-                  setPlaying(false)
+                  playback.pause()
                   setView('teacher')
                 }}
               >
@@ -640,7 +339,7 @@ function Review({
                 type="button"
                 className={`ctrl-btn ${!comparing ? 'active' : ''}`}
                 onClick={() => {
-                  setPlaying(false)
+                  playback.pause()
                   setView('clean')
                 }}
               >
@@ -656,7 +355,7 @@ function Review({
               disabled={busy}
               onClick={() => void process()}
             >
-              {hasRig ? 'Reprocess 3D Rig' : 'Generate 3D Rig'}
+              {rigSource ? 'Reprocess 3D Rig' : 'Generate 3D Rig'}
             </button>
           )}
 
@@ -680,6 +379,14 @@ export default function Analysis() {
   const id = params.get('recording')
   const recording = library.recordings.find((item) => item.id === id)
   const teacher = library.teachers.find((item) => item.id === recording?.video_id)
+  const previousRecordingId = useRef<string | null>(null)
+
+  useEffect(() => {
+    if (id && previousRecordingId.current === id && !recording) {
+      setParams({}, { replace: true })
+    }
+    previousRecordingId.current = recording?.id ?? null
+  }, [id, recording, setParams])
 
   return (
     <PageBackground>
@@ -687,6 +394,7 @@ export default function Analysis() {
         {...library}
         selected={recording?.id ?? null}
         onRecording={(item) => setParams({ recording: item.id })}
+        onDeleteRecording={library.deleteRecording}
         onUpload={async (file) => {
           const item = await upload<Recording>('/api/recordings/upload', file)
           setParams({ recording: item.id })
