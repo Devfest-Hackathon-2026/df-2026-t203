@@ -6,10 +6,7 @@ export interface Teacher {
   filename: string
   status: string
   is_processed: boolean
-  checkpoint_interval: number | null
-  checkpoint_poses: number
   keypose_count: number
-  timestamps?: Record<string, number>
   error_message?: string
 }
 

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { JointError, Recording } from './api'
 
-type Phase = 'IDLE' | 'STARTING' | 'SEEKING' | 'PAUSED' | 'PLAYING' | 'CHECKPOINT' | 'SAVING'
+type Phase = 'IDLE' | 'STARTING' | 'SEEKING' | 'PAUSED' | 'PLAYING' | 'SAVING'
 
 interface Feedback {
   state: Phase
@@ -73,8 +73,8 @@ export function useTraining(onSaved: (recording: Recording) => void) {
     if (next === 'SEEKING' || next === 'SAVING') setFeedback(undefined)
   }
 
-  function send(take: Session, type: string, action?: string) {
-    if (take.socket?.readyState === WebSocket.OPEN) take.socket.send(JSON.stringify({ type, action }))
+  function send(take: Session, type: string) {
+    if (take.socket?.readyState === WebSocket.OPEN) take.socket.send(JSON.stringify({ type }))
   }
 
   function cancelPlayback(take: Session) {
@@ -193,14 +193,14 @@ export function useTraining(onSaved: (recording: Recording) => void) {
         if (session.current !== take) return
         const epoch = performance.now()
         take.captureTimer = window.setInterval(() => {
-          if (session.current !== take || take.inFlight || ws.bufferedAmount || !['PAUSED', 'PLAYING', 'CHECKPOINT'].includes(take.phase)) return
+          if (session.current !== take || take.inFlight || ws.bufferedAmount || !['PAUSED', 'PLAYING'].includes(take.phase)) return
           take.inFlight = true
           const generation = take.generation
           const stamp = new ArrayBuffer(4)
           new DataView(stamp).setUint32(0, Math.round(performance.now() - epoch))
           context.drawImage(preview, 0, 0, canvas.width, canvas.height)
           canvas.toBlob((jpeg) => {
-            if (session.current !== take || generation !== take.generation || ws.readyState !== WebSocket.OPEN || !['PAUSED', 'PLAYING', 'CHECKPOINT'].includes(take.phase)) {
+            if (session.current !== take || generation !== take.generation || ws.readyState !== WebSocket.OPEN || !['PAUSED', 'PLAYING'].includes(take.phase)) {
               take.inFlight = false
               return
             }
@@ -216,7 +216,7 @@ export function useTraining(onSaved: (recording: Recording) => void) {
     }
   }
 
-  function control(type: string, action?: string) {
+  function control(type: string) {
     const take = session.current
     if (!take) return
     if (type === 'STOP_SESSION') {
@@ -224,7 +224,7 @@ export function useTraining(onSaved: (recording: Recording) => void) {
       setState(take, 'SAVING')
       cancelPlayback(take)
     } else if (take.phase === 'SEEKING' || take.phase === 'SAVING') return
-    send(take, type, action)
+    send(take, type)
   }
 
   return { teacher, camera, phase, feedback, dimensions, error, start, control }

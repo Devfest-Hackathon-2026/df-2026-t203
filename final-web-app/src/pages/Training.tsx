@@ -7,108 +7,6 @@ import { useTraining } from '../data/useTraining'
 
 type CameraMode = 'pip' | 'overlay' | 'sideBySide'
 
-function CheckpointEditor({ teacher, duration, busy, onSave }: {
-  teacher: Teacher
-  duration: number
-  busy: boolean
-  onSave: (seconds: number) => void
-}) {
-  const savedInterval = teacher.checkpoint_interval ?? 0
-  const [interval, setInterval] = useState(String(savedInterval))
-  const seconds = Number(interval)
-  const previewSeconds = Math.min(duration, Math.max(0, seconds))
-  const poses = Object.entries(teacher.timestamps ?? {}).sort(([a], [b]) => Number(a) - Number(b))
-
-  let posesPerSegment = teacher.checkpoint_poses || poses.length
-  if (seconds !== savedInterval) {
-    posesPerSegment = poses.length
-    if (previewSeconds > 0) {
-      // Match the server's interval-to-pose calculation for unsaved changes.
-      posesPerSegment = 1
-      for (const [id, time] of poses) {
-        if (time > previewSeconds) break
-        posesPerSegment = Math.max(1, Number(id))
-      }
-    }
-  }
-
-  // Training pauses after every group of poses except at the end of the take.
-  const boundaries = poses
-    .filter(([, time], index) =>
-      (index + 1) % posesPerSegment === 0 && index + 1 < poses.length && time > 0 && time < duration,
-    )
-    .map(([, time]) => time)
-  const segmentEnds = [...new Set(boundaries), duration]
-
-  return (
-    <form
-      className="w-full space-y-2 border border-edge bg-ink/80 px-3 py-2"
-      onSubmit={(event) => {
-        event.preventDefault()
-        onSave(seconds)
-      }}
-    >
-      {duration > 0 && (
-        <div>
-          <p className="stencil mb-1 text-[11px] text-cream/70">
-            {poses.length
-              ? `Checkpoint segments · ${segmentEnds.length === 1 ? 'Full video' : `${segmentEnds.length} segments`}`
-              : 'Checkpoint timings unavailable'}
-          </p>
-          <div role="list" aria-label="Checkpoint segments" className="flex h-6 overflow-hidden border border-amber/50">
-            {segmentEnds.map((end, index) => {
-              const start = segmentEnds[index - 1] ?? 0
-              const width = ((end - start) / duration) * 100
-              const label = `Segment ${index + 1}, ${start.toFixed(2)}–${end.toFixed(2)} seconds`
-              return (
-                <div
-                  key={end}
-                  role="listitem"
-                  title={label}
-                  style={{ width: `${width}%` }}
-                  className={`flex shrink-0 items-center justify-center overflow-hidden text-xs text-cream [&+&]:border-l [&+&]:border-amber ${index % 2 ? 'bg-amber/30' : 'bg-amber/[0.15]'}`}
-                >
-                  <span className="sr-only">{label}</span>
-                  {width >= 8 && <span aria-hidden="true">{index + 1}</span>}
-                </div>
-              )
-            })}
-          </div>
-          <input
-            type="range"
-            aria-label="Checkpoint interval slider"
-            aria-valuetext={previewSeconds ? `${previewSeconds} seconds` : 'Full video'}
-            min={0}
-            max={duration}
-            step="0.01"
-            value={previewSeconds}
-            disabled={busy}
-            onChange={(event) => setInterval(event.currentTarget.value)}
-            className="mt-1 block w-full accent-amber"
-          />
-        </div>
-      )}
-      <div className="flex flex-wrap items-center gap-2">
-        <label className="stencil flex items-center gap-1.5 border border-edge bg-ink/80 px-2.5 py-1 text-xs text-cream/80">
-          Checkpoint (s)
-          <input
-            type="number"
-            min={0}
-            max={duration || undefined}
-            step="any"
-            value={interval}
-            disabled={busy}
-            onChange={(event) => setInterval(event.currentTarget.value)}
-            className="w-16 border border-edge bg-ink px-1.5 py-0.5 text-xs text-cream"
-          />
-        </label>
-        <button type="submit" className="ctrl-btn" disabled={busy}>Set Checkpoint</button>
-        <span className="stencil text-[11px] text-cream/60">{teacher.keypose_count} Keyposes</span>
-      </div>
-    </form>
-  )
-}
-
 export default function Training() {
   const library = useLibrary()
   const navigate = useNavigate()
@@ -117,7 +15,6 @@ export default function Training() {
   const [opacity, setOpacity] = useState(50)
   const [mirror, setMirror] = useState(true)
   const [videoReady, setVideoReady] = useState('')
-  const [duration, setDuration] = useState(0)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
 
@@ -207,11 +104,7 @@ export default function Training() {
                   controls={!active}
                   muted
                   className="absolute inset-0 h-full w-full object-contain bg-black/40"
-                  onLoadedMetadata={(event) => {
-                    setVideoReady(teacher.id)
-                    const videoDuration = event.currentTarget.duration
-                    setDuration(Number.isFinite(videoDuration) ? videoDuration : 0)
-                  }}
+                  onLoadedMetadata={() => setVideoReady(teacher.id)}
                   onError={() => {
                     setVideoReady('')
                     setError('The teacher video could not be loaded.')
@@ -316,27 +209,8 @@ export default function Training() {
           </p>
         )}
 
-        {training.phase === 'CHECKPOINT' && (
-          <p className="text-xs text-amber">
-            Checkpoint reached — give a thumbs up (or click Continue) to proceed, or thumbs down to
-            retry this segment.
-          </p>
-        )}
-
         {/* Bottom Controls Bar (Top-Menu Chamfered Button Style) */}
         <div className="flex w-full max-w-5xl flex-col items-center gap-3">
-          {teacher?.is_processed && !active && (
-            <CheckpointEditor
-              key={`${teacher.id}-${teacher.checkpoint_interval}`}
-              teacher={teacher}
-              duration={videoReady === teacher.id ? duration : 0}
-              busy={busy}
-              onSave={(seconds) => void update(`/api/videos/${teacher.id}/checkpoint`, {
-                checkpoint_interval: seconds || null,
-              })}
-            />
-          )}
-
           {/* Primary Action Row */}
           <div className="flex flex-wrap items-center justify-center gap-3">
             {active ? (
@@ -349,14 +223,6 @@ export default function Training() {
                 >
                   Stop and save
                 </button>
-                <button
-                  type="button"
-                  className="ctrl-btn"
-                  disabled={!['PLAYING', 'PAUSED', 'CHECKPOINT'].includes(training.phase)}
-                  onClick={() => training.control('PREVIOUS_CHECKPOINT')}
-                >
-                  Previous checkpoint
-                </button>
                 {training.phase === 'PAUSED' && (
                   <button
                     type="button"
@@ -365,24 +231,6 @@ export default function Training() {
                   >
                     Skip pose
                   </button>
-                )}
-                {training.phase === 'CHECKPOINT' && (
-                  <>
-                    <button
-                      type="button"
-                      className="ctrl-btn active"
-                      onClick={() => training.control('CHECKPOINT_ACTION', 'Thumb_Up')}
-                    >
-                      Continue
-                    </button>
-                    <button
-                      type="button"
-                      className="ctrl-btn"
-                      onClick={() => training.control('CHECKPOINT_ACTION', 'Thumb_Down')}
-                    >
-                      Retry checkpoint
-                    </button>
-                  </>
                 )}
               </>
             ) : (
@@ -407,7 +255,7 @@ export default function Training() {
             )}
           </div>
 
-          {/* Secondary Controls Row (View Mode, Mirror, Opacity, Keyposes/Checkpoints) */}
+          {/* Secondary Controls Row (View Mode, Mirror, Opacity, Keyposes) */}
           <div className="flex flex-wrap items-center justify-center gap-2.5">
             <button
               type="button"

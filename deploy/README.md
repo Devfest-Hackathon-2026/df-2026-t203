@@ -2,9 +2,9 @@
 
 ## Local development
 
-Install Node.js 22, Python 3.11, FFmpeg, and Blender. Install the backend dependencies in a virtual environment with `python -m pip install -r deploy/requirements.txt`. The 3D pipeline also needs a Python environment with legacy MediaPipe (`mediapipe==0.10.9`, `numpy==1.23.5`, `opencv-contrib-python==4.11.0.86`) and one with `skellyforge @ git+https://github.com/freemocap/skellyforge@main`. Set `MEDIAPIPE_PYTHON` and `SKELLYFORGE_PYTHON` to those interpreters. Set `BLENDER_EXE` to the Blender executable if it is outside `PATH`. For thumbs-up and thumbs-down gestures, set `MOTIONLEARN_GESTURE_MODEL` to the [MediaPipe gesture model](https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task).
+Install Node.js 22, Python 3.11, FFmpeg, and Blender. Install the backend dependencies in a virtual environment with `python -m pip install -r deploy/requirements.txt`. The 3D pipeline also needs a Python environment with legacy MediaPipe (`mediapipe==0.10.9`, `numpy==1.23.5`, `opencv-contrib-python==4.11.0.86`) and one with `skellyforge @ git+https://github.com/freemocap/skellyforge@main`. Set `MEDIAPIPE_PYTHON` and `SKELLYFORGE_PYTHON` to those interpreters. Set `BLENDER_EXE` to the Blender executable if it is outside `PATH`.
 
-Set `MOTIONLEARN_DATA_DIR` to a fresh directory such as `.motionlearn-data`, then run `python final-web-app/run_server.py` from the repository root. In `final-web-app`, run `npm ci` and `npm run dev`. Open the localhost URL printed by Vite. This data directory starts with the sample teacher video and an empty recording library. The checkpoint buttons also work when the gesture model is unavailable.
+Set `MOTIONLEARN_DATA_DIR` to a fresh directory such as `.motionlearn-data`, then run `python final-web-app/run_server.py` from the repository root. In `final-web-app`, run `npm ci` and `npm run dev`. Open the localhost URL printed by Vite. This data directory starts with the sample teacher video and an empty recording library.
 
 ## Compute Engine
 
@@ -68,4 +68,4 @@ sudo docker compose --env-file deploy/.env -f deploy/compose.yaml up --build -d
 sudo docker compose --env-file deploy/.env -f deploy/compose.yaml ps
 ```
 
-Sign in as `judge` on the HTTPS site. Upload a short teacher clip, set a checkpoint interval shorter than the clip, and train from a separate laptop. Retry a checkpoint and check that the saved take and generated rig play in sync. Test the downloads and the unauthenticated response, then reboot the VM and check that the library survives. For a later release, rerun `up --build -d` against the same mounted data directory.
+Sign in as `judge` on the HTTPS site. Upload a short teacher clip and train from a separate laptop. Match or skip each pose and check that the saved take and generated rig play in sync. Test the downloads and the unauthenticated response, then reboot the VM and check that the library survives. For a later release, rerun `up --build -d` against the same mounted data directory.

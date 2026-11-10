@@ -3,8 +3,7 @@
 Integrates:
 1. Teacher Video management (MP4 upload or YouTube link download via yt-dlp).
 2. Keypose extraction (`utilities/preprocess.py` -> `generate_keyposes_new`).
-3. YouTube Extension functionality (Checkpoint interval slider, Webcam Overlay,
-   and Interactive Copy-Training via WebSocket `/ws/training/{video_id}`).
+3. Webcam overlay and interactive copy-training via WebSocket `/ws/training/{video_id}`.
 4. Clean user webcam recording (without overlays) tucked in a per-video
    subdirectory in the sidebar, with download & Motion Capture 3D processing.
 """
@@ -132,32 +131,6 @@ class YouTubeRequest(BaseModel):
     name: str | None = None
 
 
-class CheckpointRequest(BaseModel):
-    checkpoint_interval: float | None = None
-
-
-def compute_checkpoint_boundary(timestamps: Dict[str, float], checkpoint_interval: float | None) -> int:
-    """Compute checkpoint pose boundary from interval (matching utilities/youtube_downloader.py)."""
-    if not timestamps:
-        return 5
-    if checkpoint_interval is not None and checkpoint_interval > 0:
-        chosen_key = "1"
-        for key, val in sorted(timestamps.items(), key=lambda item: float(item[0])):
-            if float(val) <= float(checkpoint_interval):
-                chosen_key = str(key)
-            else:
-                break
-        try:
-            point = int(chosen_key)
-            if point <= 0:
-                point = 1
-        except ValueError:
-            point = len(timestamps)
-    else:
-        point = len(timestamps)
-    return max(1, point)
-
-
 def convert_to_browser_mp4(src_path: Path, dest_path: Path, *, strict=False) -> None:
     """Convert/remux any video file to browser-compatible H.264 MP4."""
     ffmpeg_exe = shutil.which("ffmpeg")
@@ -222,8 +195,6 @@ def load_videos_locked() -> List[Dict[str, Any]]:
                 "keyposes_dir": "vid_sample_keyposes",
                 "keypose_count": 0,
                 "timestamps": {},
-                "checkpoint_interval": None,
-                "checkpoint_poses": 5,
             })
         VIDEOS_META_FILE.write_text(json.dumps(initial_videos, indent=2), encoding="utf-8")
         return initial_videos
@@ -439,9 +410,6 @@ def run_keyposes_worker(video_id: str, video_path: Path, keyposes_dir: Path) -> 
             if not raw_ts:
                 raise ValueError("No usable keyposes were detected.")
             timestamps = {str(k): float(v) for k, v in raw_ts.items()}
-            video_info = get_video_by_id(video_id) or {}
-            cp_interval = video_info.get("checkpoint_interval")
-            cp_poses = compute_checkpoint_boundary(timestamps, cp_interval)
 
             video_keypose_logs[video_id].append(
                 f"[success] Extracted {len(timestamps)} keyposes! Ready for copy-training."
@@ -451,7 +419,6 @@ def run_keyposes_worker(video_id: str, video_path: Path, keyposes_dir: Path) -> 
                 "status": "ready",
                 "keypose_count": len(timestamps),
                 "timestamps": timestamps,
-                "checkpoint_poses": cp_poses,
             })
         else:
             video_keypose_logs[video_id].append("[error] Not enough valid pose frames detected in video.")
@@ -625,8 +592,6 @@ async def upload_teacher_video(
         "keyposes_dir": f"{vid_id}_keyposes",
         "keypose_count": 0,
         "timestamps": {},
-        "checkpoint_interval": None,
-        "checkpoint_poses": 5,
     }
 
     with metadata_lock:
@@ -711,8 +676,6 @@ def add_youtube_video(req: YouTubeRequest, auto_process: bool = False):
         "keyposes_dir": f"{vid_id}_keyposes",
         "keypose_count": 0,
         "timestamps": {},
-        "checkpoint_interval": None,
-        "checkpoint_poses": 5,
     }
 
     with metadata_lock:
@@ -757,30 +720,8 @@ def get_teacher_video_status(video_id: str):
         "is_processed": video.get("is_processed", False),
         "keypose_count": video.get("keypose_count", 0),
         "timestamps": video.get("timestamps", {}),
-        "checkpoint_interval": video.get("checkpoint_interval"),
-        "checkpoint_poses": video.get("checkpoint_poses", 5),
         "logs": video_keypose_logs.get(video_id, []),
         "error_message": video.get("error_message"),
-    }
-
-
-@app.post("/api/videos/{video_id}/checkpoint")
-def set_video_checkpoint(video_id: str, req: CheckpointRequest):
-    video = get_video_by_id(video_id)
-    if not video:
-        raise HTTPException(status_code=404, detail="Teacher video not found")
-
-    timestamps = video.get("timestamps") or {}
-    cp_poses = compute_checkpoint_boundary(timestamps, req.checkpoint_interval)
-
-    updated = update_video(video_id, {
-        "checkpoint_interval": req.checkpoint_interval,
-        "checkpoint_poses": cp_poses,
-    })
-    return {
-        "id": video_id,
-        "checkpoint_interval": updated.get("checkpoint_interval") if updated else req.checkpoint_interval,
-        "checkpoint_poses": cp_poses,
     }
 
 
@@ -893,11 +834,10 @@ async def training_websocket(websocket: WebSocket, video_id: str):
 
     try:
         if browser:
-            await run_browser_training(websocket, video, keyposes_dir, final_recording_path, save_browser)
+            await run_browser_training(websocket, keyposes_dir, final_recording_path, save_browser)
         else:
             await run_web_training_session(
                 websocket=websocket,
-                video_info=video,
                 keyposes_dir=keyposes_dir,
                 raw_recording_path=raw_recording_path,
                 final_recording_path=final_recording_path,

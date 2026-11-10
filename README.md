@@ -16,13 +16,13 @@ The MotionLearn product frontend lives in `final-web-app/`. See the [MotionLearn
 2. **Automated Keypose & Trajectory Extraction**:
    - Analyzes movement velocity and kinetic energy peaks using Google MediaPipe Pose to segment videos into keyposes and DTW trajectories.
 
-3. **Integrated Video Player & Checkpoints**:
-   - Interactive checkpoint intervals slider with repeating ghost markers and keypose ticks along the video timeline.
+3. **Integrated Video Player**:
+   - Key-pose navigation and synchronized playback in Analysis.
    - Built-in expandable OpenCV webcam feedback overlay.
 
 4. **Real-time Pose-Copying & Adaptive Playback**:
    - The teacher video pauses at each keypose and **only plays forward when the student matches and holds the target pose**.
-   - Displays real-time joint correction arrows (Euclidean error) and gesture recognition (`Thumb_Up` / `Thumb_Down` for checkpoint replay).
+   - Displays real-time joint correction arrows (Euclidean error).
    - Dynamic Time Warping (DTW) movement scoring during transitions.
 
 5. **Clean Video Recording for Motion Capture**:

@@ -1,9 +1,8 @@
-"""Browser camera training and a clean, checkpoint-editable recording."""
+"""Browser camera training and clean video recording."""
 
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
 import json
 import math
 from pathlib import Path
@@ -19,54 +18,25 @@ from training_session import (
     calculate_pose_match_score, update_hold_progress,
 )
 from utilities.dtw_scoring import score_transition
-from utilities.handrecognizer import HandRecognizer
 from utilities.mediapipeline import MedaiPipeline
 
 FPS = 24
 MAX_FRAME_BYTES = 512 * 1024
 
 
-@dataclass
-class Segment:
-    path: Path
-    first_pose: int
-    frames: int = 0
-    sync: dict = field(default_factory=dict)
-    feedback: list = field(default_factory=list)
-
-
 class Take:
     def __init__(self, directory: Path):
-        self.directory = directory
-        self.segments = []
+        self.path = directory / "capture.mp4"
         self.writer = None
         self.frame_size = None
-        self.new_segment(0)
+        self.frames = 0
+        self.sync = {}
+        self.feedback = []
 
-    @property
-    def current(self):
-        return self.segments[-1]
-
-    def new_segment(self, first_pose):
-        self.close_segment()
-        self.segments.append(Segment(self.directory / f"{len(self.segments)}.mp4", first_pose))
-        self.epoch = self.last_timestamp = None
-        self.last_frame = None
-
-    def close_segment(self):
+    def close(self):
         if self.writer is not None:
             self.writer.release()
             self.writer = None
-
-    def rewind(self, previous):
-        self.close_segment()
-        destination = max(0, len(self.segments) - (2 if previous else 1))
-        first_pose = self.segments[destination].first_pose
-        for segment in self.segments[destination:]:
-            segment.path.unlink(missing_ok=True)
-        del self.segments[destination:]
-        self.new_segment(first_pose)
-        return first_pose
 
     def write(self, frame, timestamp):
         height, width = frame.shape[:2]
@@ -75,7 +45,7 @@ class Take:
         if self.frame_size != (width, height):
             raise ValueError("The camera frame size changed during training.")
         if self.writer is None:
-            self.writer = cv2.VideoWriter(str(self.current.path), cv2.VideoWriter_fourcc(*"mp4v"), FPS, self.frame_size)
+            self.writer = cv2.VideoWriter(str(self.path), cv2.VideoWriter_fourcc(*"mp4v"), FPS, self.frame_size)
             if not self.writer.isOpened():
                 raise RuntimeError("Could not start the clean recording.")
             self.epoch = timestamp
@@ -84,45 +54,42 @@ class Take:
 
         index = round((timestamp - self.epoch) * FPS / 1000)
         self.last_timestamp = timestamp
-        if index < self.current.frames:
+        if index < self.frames:
             return None
-        while self.current.frames < index:
+        while self.frames < index:
             self.writer.write(self.last_frame)
-            self.current.frames += 1
+            self.frames += 1
         self.writer.write(frame)
-        self.current.frames += 1
+        self.frames += 1
         self.last_frame = frame
         return index
 
     def finish(self, output):
-        self.close_segment()
-        duration = sum(segment.frames for segment in self.segments) / FPS
+        self.close()
+        duration = self.frames / FPS
         if duration < 0.5:
             return None
-        manifest = self.directory / "segments.txt"
-        manifest.write_text("".join(f"file {segment.path.name}\n" for segment in self.segments if segment.frames), encoding="ascii")
-        encoded = self.directory / "final.mp4"
+        encoded = self.path.with_name("final.mp4")
         subprocess.run([
-            "ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-f", "concat", "-i", str(manifest),
+            "ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-i", str(self.path),
             "-vf", f"setpts=N/({FPS}*TB)", "-r", str(FPS), "-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p",
             "-movflags", "+faststart", str(encoded),
         ], check=True, timeout=max(180, 2 * duration))
-        sync, feedback = [], []
-        offset = 0
-        for segment in self.segments:
-            for pose, entry in segment.sync.items():
-                sync.append({
-                    "pose_id": pose,
-                    "mocap_arrive_time": (offset + entry["arrive"]) / FPS,
-                    "mocap_match_time": (offset + entry.get("match", segment.frames)) / FPS,
-                })
-            for position, (index, joints) in enumerate(segment.feedback):
-                if joints:
-                    following = segment.feedback[position + 1][0] if position + 1 < len(segment.feedback) else segment.frames
-                    end = min(following, index + FPS // 4)
-                    if end > index:
-                        feedback.append({"start": (offset + index) / FPS, "end": (offset + end) / FPS, "joints": joints})
-            offset += segment.frames
+        sync = [
+            {
+                "pose_id": pose,
+                "mocap_arrive_time": entry["arrive"] / FPS,
+                "mocap_match_time": entry.get("match", self.frames) / FPS,
+            }
+            for pose, entry in self.sync.items()
+        ]
+        feedback = []
+        for position, (index, joints) in enumerate(self.feedback):
+            if joints:
+                following = self.feedback[position + 1][0] if position + 1 < len(self.feedback) else self.frames
+                end = min(following, index + FPS // 4)
+                if end > index:
+                    feedback.append({"start": index / FPS, "end": end / FPS, "joints": joints})
         encoded.replace(output)
         return sync, feedback, duration
 
@@ -137,7 +104,7 @@ def decode_frame(payload):
 
 
 class BrowserTraining:
-    def __init__(self, websocket, video, keyposes_dir, take):
+    def __init__(self, websocket, keyposes_dir, take):
         self.ws = websocket
         self.take = take
         self.timestamps = self.read(keyposes_dir, "timestamps")
@@ -146,12 +113,7 @@ class BrowserTraining:
         self.total = len(self.timestamps)
         if not self.total:
             raise ValueError("No teacher keyposes are available.")
-        self.interval = int(video.get("checkpoint_poses") or self.total)
         self.pipeline = MedaiPipeline(enable_ble=False, ema_alpha=0.65)
-        try:
-            self.gestures = HandRecognizer()
-        except (FileNotFoundError, RuntimeError, ValueError):
-            self.gestures = None
         self.targets = {key: self.pipeline.human_analysis(pose)[0] for key, pose in self.poses.items()}
         self.normalized = {key: self.pipeline.normalize_pose(pose)[0] for key, pose in self.poses.items()}
         self.pose = 0
@@ -169,51 +131,27 @@ class BrowserTraining:
         self.dtw = None
         self.transition = []
 
-    async def seek(self, first_pose):
-        self.pose = first_pose
-        self.state = "SEEKING"
-        self.pipeline.pose_filter.previous_pose.clear()
-        self.pipeline.world_pose_filter.previous_pose.clear()
-        self.reset_scoring()
-        await self.ws.send_json({
-            "action": "seek", "seek_time": self.timestamps[str(max(0, first_pose - 1))],
-            "state": self.state,
-        })
-
     async def play_to_pose(self):
         self.state = "PLAYING"
         await self.ws.send_json({"action": "play_until", "target_time": self.timestamps[str(self.pose)], "state": self.state})
 
     async def advance(self):
-        segment = self.take.current
-        segment.sync.setdefault(self.pose, {"arrive": segment.frames})["match"] = segment.frames
-        segment.feedback.append((segment.frames, []))
+        self.take.sync.setdefault(self.pose, {"arrive": self.take.frames})["match"] = self.take.frames
+        self.take.feedback.append((self.take.frames, []))
         if self.pose + 1 == self.total:
             return True
-        if (self.pose + 1) % self.interval == 0:
-            self.state = "CHECKPOINT"
-            await self.ws.send_json({"action": "pause", "state": self.state})
-        else:
-            self.pose += 1
-            self.reset_scoring()
-            await self.play_to_pose()
+        self.pose += 1
+        self.reset_scoring()
+        await self.play_to_pose()
         return False
 
     async def control(self, message):
         kind = message.get("type")
-        action = message.get("action")
         if kind == "STOP_SESSION":
             return True
-        if (kind == "PREVIOUS_CHECKPOINT" and self.state != "SEEKING") or (
-            kind == "CHECKPOINT_ACTION" and action == "Thumb_Down" and self.state == "CHECKPOINT"
-        ):
-            await self.seek(await asyncio.to_thread(self.take.rewind, kind == "PREVIOUS_CHECKPOINT"))
-        elif kind == "SEEKED" and self.state == "SEEKING":
-            if self.pose:
-                await self.play_to_pose()
-            else:
-                self.state = "PAUSED"
-                await self.ws.send_json({"action": "pause", "state": self.state})
+        if kind == "SEEKED" and self.state == "SEEKING":
+            self.state = "PAUSED"
+            await self.ws.send_json({"action": "pause", "state": self.state})
         elif kind == "ARRIVED" and self.state == "PLAYING":
             trajectory = self.trajectories.get(str(self.pose - 1))
             if trajectory and len(self.transition) >= 2:
@@ -222,11 +160,6 @@ class BrowserTraining:
             self.state = "PAUSED"
         elif kind == "SKIP_POSE" and self.state == "PAUSED":
             return await self.advance()
-        elif kind == "CHECKPOINT_ACTION" and action == "Thumb_Up" and self.state == "CHECKPOINT":
-            self.pose += 1
-            await asyncio.to_thread(self.take.new_segment, self.pose)
-            self.reset_scoring()
-            await self.play_to_pose()
         return False
 
     def assess(self, frame):
@@ -279,24 +212,17 @@ class BrowserTraining:
         done = False
         if self.state != "SEEKING":
             frame, timestamp = await asyncio.to_thread(decode_frame, payload)
-            if self.state == "CHECKPOINT":
-                if self.gestures:
-                    action = await asyncio.to_thread(self.gestures.mark_frame, frame, timestamp)
-                    if action in ("Thumb_Up", "Thumb_Down"):
-                        await self.control({"type": "CHECKPOINT_ACTION", "action": action})
-            else:
-                index = await asyncio.to_thread(self.take.write, frame, timestamp)
-                if index is not None:
-                    segment = self.take.current
-                    paused = self.state == "PAUSED"
-                    if paused:
-                        segment.sync.setdefault(self.pose, {"arrive": index})
-                    mistakes, arrows, review_errors = await asyncio.to_thread(self.assess, frame)
-                    if paused:
-                        segment.feedback.append((index, review_errors))
-                    if self.hold >= REQUIRED_HOLD_FRAMES:
-                        done = await self.advance()
-                        mistakes, arrows = [], []
+            index = await asyncio.to_thread(self.take.write, frame, timestamp)
+            if index is not None:
+                paused = self.state == "PAUSED"
+                if paused:
+                    self.take.sync.setdefault(self.pose, {"arrive": index})
+                mistakes, arrows, review_errors = await asyncio.to_thread(self.assess, frame)
+                if paused:
+                    self.take.feedback.append((index, review_errors))
+                if self.hold >= REQUIRED_HOLD_FRAMES:
+                    done = await self.advance()
+                    mistakes, arrows = [], []
         await self.ws.send_json({
             "type": "TRAINING_FEEDBACK", "state": self.state, "pose": self.pose + 1, "total": self.total,
             "hold": self.hold, "required_hold": REQUIRED_HOLD_FRAMES, "score": self.score,
@@ -305,7 +231,7 @@ class BrowserTraining:
         return done
 
     async def capture(self):
-        await self.seek(0)
+        await self.ws.send_json({"action": "seek", "seek_time": self.timestamps["0"], "state": self.state})
         while True:
             message = await asyncio.wait_for(self.ws.receive(), timeout=15)
             if message["type"] == "websocket.disconnect":
@@ -328,13 +254,13 @@ class BrowserTraining:
         return entries
 
 
-async def run_browser_training(websocket, video, keyposes_dir, output, save):
+async def run_browser_training(websocket, keyposes_dir, output, save):
     with TemporaryDirectory(prefix=".take-", dir=output.parent) as directory:
         take = Take(Path(directory))
         session = None
         saved = False
         try:
-            session = await asyncio.to_thread(BrowserTraining, websocket, video, keyposes_dir, take)
+            session = await asyncio.to_thread(BrowserTraining, websocket, keyposes_dir, take)
             await session.capture()
             await websocket.send_json({"type": "SAVING"})
             result = await asyncio.to_thread(take.finish, output)
@@ -346,10 +272,8 @@ async def run_browser_training(websocket, video, keyposes_dir, output, save):
             saved = True
             await websocket.send_json({"type": "SESSION_COMPLETE", "recording": recording})
         finally:
-            take.close_segment()
+            take.close()
             if not saved:
                 output.unlink(missing_ok=True)
             if session is not None:
                 session.pipeline.landmarker.close()
-                if session.gestures is not None:
-                    session.gestures.landmarker.close()
