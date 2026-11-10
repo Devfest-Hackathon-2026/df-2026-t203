@@ -4,6 +4,8 @@
 
 ![banner](readme-screenshots/banner.png)
 
+MotionLearnのURLはこちらからアクセス: [MotionLearn デモ](https://35.200.34.115/) 
+
 ## チーム情報
 
 | 項目 | 内容 |
@@ -97,13 +99,9 @@ flowchart LR
 | [utilities/](utilities/) | キーポーズ抽出、ジェスチャー認識、動作の採点 |
 | [deploy/](deploy/) | ローカル起動手順、Docker Compose、Compute Engine の構成 |
 
-## 5. デプロイ先
+## 5. 起動と動作確認
 
-ハッカソン提出時の [MotionLearn デモ](https://35.200.34.115/) では、ブラウザの認証ダイアログで審査用アカウントを使用します。構成とデプロイ手順は [運用ガイド](deploy/README.md#compute-engine) を参照してください。
-
-## 6. 起動と動作確認
-
-### 6.1 ローカル起動
+### 5.1 ローカル起動
 
 Node.js 22、Python 3.11、FFmpeg、Blender を用意します。Python 仮想環境の設定と、3D 生成用の MediaPipe・Skellyforge 環境の準備は [運用ガイド](deploy/README.md#local-development) に従ってください。
 
@@ -123,7 +121,7 @@ npm ci
 npm run dev
 ```
 
-### 6.2 サンプルで確認する
+### 5.2 サンプルで確認する
 
 1. **Train** を開き、**Sample Video (captured_vid)** を選びます。同梱のサンプルには抽出済みのキーポーズが 8 個あります。
 2. **Start recording** を押し、カメラの利用を許可して、全身が映る位置に立ちます。
