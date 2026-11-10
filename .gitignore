@@ -13,16 +13,16 @@ youtube_extension.zip
 keyposes/
 captured_vid.mp4
 fixed.py
-web_app/recordings_data/*.mp4
-web_app/recordings_data/*.webm
-web_app/teacher_videos/*.mp4
-!web_app/teacher_videos/vid_sample.mp4
-web_app/teacher_videos/*_dl.*
-web_app/teacher_videos/*_raw.*
+final-web-app/recordings_data/*.mp4
+final-web-app/recordings_data/*.webm
+final-web-app/teacher_videos/*.mp4
+!final-web-app/teacher_videos/vid_sample.mp4
+final-web-app/teacher_videos/*_dl.*
+final-web-app/teacher_videos/*_raw.*
 Motion_Capture/output/
 .motionlearn-data/
-web_app/recordings_data/*.feedback.json
-web_app/recordings_data/.take-*/
+final-web-app/recordings_data/*.feedback.json
+final-web-app/recordings_data/.take-*/
 
 
 # 秘密情報（コミットしない）

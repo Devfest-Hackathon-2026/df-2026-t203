@@ -1,5 +1,73 @@
 [
   {
+    "id": "rec_bb1b09e57e6749129522c8c7e95af3fd",
+    "video_id": "vid_sample",
+    "video_name": "Sample Video (captured_vid)",
+    "recording_no": 2,
+    "title": "Recording #2 - Nov 10, 2026, 10:22 AM",
+    "created_at": "Nov 10, 2026, 10:22 AM",
+    "filename": "rec_bb1b09e57e6749129522c8c7e95af3fd.mp4",
+    "is_processed": true,
+    "status": "completed",
+    "output_dir_name": "rec_bb1b09e57e6749129522c8c7e95af3fd",
+    "glb_filename": "rec_bb1b09e57e6749129522c8c7e95af3fd_animated.glb",
+    "blend_filename": "rec_bb1b09e57e6749129522c8c7e95af3fd.blend",
+    "fbx_filename": "rec_bb1b09e57e6749129522c8c7e95af3fd_animated.fbx",
+    "keypose_sync": [
+      {
+        "pose_id": 0,
+        "mocap_arrive_time": 0.0,
+        "mocap_match_time": 0.9583333333333334,
+        "teacher_time": 0.1,
+        "next_teacher_time": 3.1666666666666665,
+        "next_mocap_arrive_time": 4.166666666666667
+      },
+      {
+        "pose_id": 1,
+        "mocap_arrive_time": 4.166666666666667,
+        "mocap_match_time": 4.791666666666667,
+        "teacher_time": 3.1666666666666665,
+        "next_teacher_time": 4.366666666666666,
+        "next_mocap_arrive_time": 6.166666666666667
+      },
+      {
+        "pose_id": 2,
+        "mocap_arrive_time": 6.166666666666667,
+        "mocap_match_time": 6.791666666666667,
+        "teacher_time": 4.366666666666666,
+        "next_teacher_time": 6.1,
+        "next_mocap_arrive_time": 8.625
+      },
+      {
+        "pose_id": 3,
+        "mocap_arrive_time": 8.625,
+        "mocap_match_time": 9.291666666666666,
+        "teacher_time": 6.1,
+        "next_teacher_time": 10.233333333333333,
+        "next_mocap_arrive_time": 13.625
+      },
+      {
+        "pose_id": 4,
+        "mocap_arrive_time": 13.625,
+        "mocap_match_time": 15.041666666666666,
+        "teacher_time": 10.233333333333333,
+        "next_teacher_time": 12.1,
+        "next_mocap_arrive_time": 17.0
+      },
+      {
+        "pose_id": 5,
+        "mocap_arrive_time": 17.0,
+        "mocap_match_time": 31.583333333333332,
+        "teacher_time": 12.1,
+        "next_teacher_time": 12.1,
+        "next_mocap_arrive_time": 31.583333333333332
+      }
+    ],
+    "browser_take": true,
+    "teacher_video_filename": "vid_sample.mp4",
+    "error_message": null
+  },
+  {
     "id": "rec_20261109_233809",
     "video_id": "vid_sample",
     "video_name": "Sample Video (captured_vid)",

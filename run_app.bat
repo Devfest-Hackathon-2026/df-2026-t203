@@ -1,7 +1,7 @@
 @echo off
 cd /d "%~dp0"
-echo Starting Ninjoucon Mocap Studio...
+echo Starting MotionLearn Studio...
 call .\venv\Scripts\activate.bat
-python .\web_app\run_server.py
+python .\final-web-app\run_server.py
 pause
 

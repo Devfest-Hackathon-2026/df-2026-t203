@@ -24,39 +24,41 @@ body {
 
   /* Deadlock-style plate: chamfered, slightly uneven cut corners.
      Border = ::before layer, fill = ::after layer. Hover tilts + pops with overshoot. */
-  .glow-btn, .nav-tab {
+  .glow-btn, .nav-tab, .ctrl-btn {
     position: relative; isolation: isolate; display: inline-flex; align-items: center; justify-content: center;
     cursor: pointer; background: none; border: none; color: #fff0dc;
     clip-path: polygon(12px 0, calc(100% - 5px) 2px, 100% calc(100% - 12px), calc(100% - 12px) 100%, 4px calc(100% - 2px), 0 10px);
-    transition: transform .22s cubic-bezier(.34, 1.7, .5, 1), color .12s;
+    transition: transform .22s cubic-bezier(.34, 1.7, .5, 1), color .12s, opacity .12s;
     will-change: transform;
   }
-  .glow-btn::before, .nav-tab::before {
+  .glow-btn::before, .nav-tab::before, .ctrl-btn::before {
     content: ''; position: absolute; inset: 0; z-index: -2;
     background: rgba(255, 240, 220, .55); transition: background .12s;
   }
-  .glow-btn::after, .nav-tab::after {
+  .glow-btn::after, .nav-tab::after, .ctrl-btn::after {
     content: ''; position: absolute; inset: 2px; z-index: -1;
     background: #0b0a08; opacity: .85;
     clip-path: polygon(11px 0, calc(100% - 5px) 1px, 100% calc(100% - 11px), calc(100% - 11px) 100%, 3px calc(100% - 1px), 0 9px);
     transition: background .12s, opacity .12s;
   }
-  .glow-btn:hover, .nav-tab:hover {
+  .glow-btn:hover:not(:disabled), .nav-tab:hover:not(:disabled), .ctrl-btn:hover:not(:disabled) {
     transform: rotate(-3.5deg) scale(1.12) translateY(-2px);
     color: #0b0a08;
   }
-  .glow-btn:hover::before, .nav-tab:hover::before { background: #ffd58a; }
-  .glow-btn:hover::after, .nav-tab:hover::after { background: #ff8a1f; opacity: 1; }
-  .glow-btn:active, .nav-tab:active { transform: rotate(-1.5deg) scale(1.02); }
+  .glow-btn:hover:not(:disabled)::before, .nav-tab:hover:not(:disabled)::before, .ctrl-btn:hover:not(:disabled)::before { background: #ffd58a; }
+  .glow-btn:hover:not(:disabled)::after, .nav-tab:hover:not(:disabled)::after, .ctrl-btn:hover:not(:disabled)::after { background: #ff8a1f; opacity: 1; }
+  .glow-btn:active:not(:disabled), .nav-tab:active:not(:disabled), .ctrl-btn:active:not(:disabled) { transform: rotate(-1.5deg) scale(1.02); }
+  .glow-btn:disabled, .nav-tab:disabled, .ctrl-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
   .glow-btn { @apply font-display text-cream; padding: 0.4rem 2.5rem; }
   .nav-tab { @apply stencil px-6 py-2 text-sm; }
   .nav-tab:not(:hover):not(.active) { color: rgba(255, 240, 220, .8); }
   .nav-tab:not(:hover):not(.active)::before, .nav-tab:not(:hover):not(.active)::after { opacity: 0; }
-  .nav-tab.active { color: #0b0a08; }
-  .nav-tab.active::before { background: #ffd58a; }
-  .nav-tab.active::after { background: #ff8a1f; opacity: 1; }
-  .nav-tab.active:hover { transform: rotate(-3.5deg) scale(1.1); }
+  .nav-tab.active, .ctrl-btn.active { color: #0b0a08; }
+  .nav-tab.active::before, .ctrl-btn.active::before { background: #ffd58a; }
+  .nav-tab.active::after, .ctrl-btn.active::after { background: #ff8a1f; opacity: 1; }
+  .nav-tab.active:hover:not(:disabled), .ctrl-btn.active:hover:not(:disabled) { transform: rotate(-3.5deg) scale(1.1); }
+  .ctrl-btn { @apply stencil px-4 py-1.5 text-xs; }
 }
 
 /* subtle film grain + vignette */

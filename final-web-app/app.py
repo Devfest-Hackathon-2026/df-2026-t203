@@ -45,11 +45,11 @@ from training_session import build_keypose_sync_for_recording, run_web_training_
 from browser_training import run_browser_training  # noqa: E402
 
 DATA_DIR = Path(os.environ["MOTIONLEARN_DATA_DIR"]).resolve() if "MOTIONLEARN_DATA_DIR" in os.environ else None
-PRODUCT_DIST = Path(os.environ["MOTIONLEARN_DIST"]).resolve() if "MOTIONLEARN_DIST" in os.environ else None
+DEFAULT_DIST = WEB_APP_DIR / "dist"
+PRODUCT_DIST = Path(os.environ["MOTIONLEARN_DIST"]).resolve() if "MOTIONLEARN_DIST" in os.environ else (DEFAULT_DIST if (DEFAULT_DIST / "index.html").is_file() else None)
 PUBLIC_ORIGIN = os.getenv("MOTIONLEARN_ORIGIN")
 RECORDINGS_DATA_DIR = (DATA_DIR or WEB_APP_DIR) / "recordings_data"
 TEACHER_VIDEOS_DIR = (DATA_DIR or WEB_APP_DIR) / "teacher_videos"
-STATIC_DIR = WEB_APP_DIR / "static"
 MOTION_CAPTURE_DIR = WORKSPACE_DIR / "Motion_Capture"
 PIPELINE_SCRIPT = MOTION_CAPTURE_DIR / "run_pipeline.py"
 OUTPUTS_DIR = (DATA_DIR or MOTION_CAPTURE_DIR) / "output"
@@ -1108,9 +1108,7 @@ def serve_dojo_environment():
     return FileResponse(path, media_type="model/gltf-binary")
 
 
-if PRODUCT_DIST is None:
-    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
-else:
+if PRODUCT_DIST is not None:
     app.mount("/assets", StaticFiles(directory=PRODUCT_DIST / "assets"), name="product-assets")
     app.mount("/media", StaticFiles(directory=PRODUCT_DIST / "media"), name="product-media")
 
@@ -1124,15 +1122,12 @@ else:
 def serve_ui():
     if PRODUCT_DIST is not None:
         return serve_product()
-    index_file = STATIC_DIR / "index.html"
-    if not index_file.is_file():
-        return HTMLResponse("<h1>UI file not found.</h1>", status_code=500)
-    return HTMLResponse(index_file.read_text(encoding="utf-8"))
+    return HTMLResponse("<h1>Frontend build not found. Run npm run build in final-web-app.</h1>", status_code=500)
 
 
 if __name__ == "__main__":
     import uvicorn
 
     load_metadata()
-    print("Starting Ninjoucon Mocap Studio Web App on http://localhost:8000")
+    print("Starting MotionLearn Web App on http://localhost:8000")
     uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=False)

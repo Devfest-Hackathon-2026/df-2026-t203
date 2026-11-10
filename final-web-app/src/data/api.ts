@@ -27,6 +27,7 @@ export interface Recording {
   title: string
   filename: string
   status: string
+  is_processed?: boolean
   output_dir_name: string
   glb_filename?: string
   blend_filename?: string
