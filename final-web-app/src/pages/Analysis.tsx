@@ -3,6 +3,7 @@ import { useSearchParams } from 'react-router-dom'
 import PageBackground from '../components/PageBackground'
 import RigViewer from '../components/RigViewer'
 import Sidebar from '../components/Sidebar'
+import { mirroredPoseErrorRegion, poseErrorsAt, sustainedPoseErrors } from '../data/poseErrors'
 import { useAnalysisPlayback, type Checkpoint } from '../data/useAnalysisPlayback'
 import {
   outputUrl,
@@ -12,6 +13,7 @@ import {
   teacherUrl,
   upload,
   useLibrary,
+  type Feedback,
   type Recording,
 } from '../data/api'
 
@@ -53,6 +55,7 @@ function Review({
   const [videoMetadata, setVideoMetadata] = useState({ source: '', duration: 0 })
   const [rigMetadata, setRigMetadata] = useState({ source: '', duration: 0 })
   const [cleanTimings, setCleanTimings] = useState<{ key: string; times: number[] } | null>(null)
+  const [feedback, setFeedback] = useState<Feedback[] | 'unavailable' | null>(null)
   const [looping, setLooping] = useState(true)
   const [speed, setSpeed] = useState(1.0)
   const [stage, setStage] = useState('')
@@ -86,6 +89,24 @@ function Review({
   })
   const { time, playing, status: keyposeStatus } = playback
   const noKeyposes = enabled && rigDuration > 0 && checkpoints.length === 0
+  const errorTimeline = useMemo(() => Array.isArray(feedback) ? sustainedPoseErrors(feedback) : [], [feedback])
+  const regionsAtTime = poseErrorsAt(errorTimeline, time)
+  const activeErrors = recording.mocap_mirrored
+    ? regionsAtTime.map((region) => mirroredPoseErrorRegion[region])
+    : regionsAtTime
+
+  useEffect(() => {
+    if (!rigSource) return
+    const controller = new AbortController()
+    void request<Feedback[]>(`${base}/feedback`, { signal: controller.signal })
+      .then((entries) => {
+        if (!controller.signal.aborted) setFeedback(entries)
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) setFeedback('unavailable')
+      })
+    return () => controller.abort()
+  }, [base, rigSource])
 
   useEffect(() => {
     if (!rigSource || recording.status === 'processing') return
@@ -195,6 +216,7 @@ function Review({
             <RigViewer
               url={rigSource}
               mocapTime={time}
+              poseErrors={activeErrors}
               onDurationLoaded={(dur) => setRigMetadata({ source: rigSource, duration: dur })}
             />
           ) : (
@@ -226,6 +248,16 @@ function Review({
           )}
         </section>
       </div>
+
+      {rigDuration > 0 && feedback !== null && (
+        <p className="text-center text-xs text-cream/70">
+          {feedback === 'unavailable'
+            ? 'Pose feedback could not be loaded.'
+            : errorTimeline.length > 0
+              ? <><span className="text-red-400">●</span> Red highlights mark sustained pose errors.{activeErrors.length > 0 && ` ${activeErrors.join(' · ')}`}</>
+              : 'No sustained pose errors available for this recording.'}
+        </p>
+      )}
 
       {error && (
         <p role="alert" className="text-center text-sm text-red-300">

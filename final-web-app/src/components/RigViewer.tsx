@@ -2,6 +2,8 @@ import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from 're
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
+import { createPoseErrorHighlights } from './poseErrorHighlights'
+import type { PoseErrorRegion } from '../data/poseErrors'
 
 type CameraPreset = 'front' | 'perspective' | 'side' | 'upper'
 
@@ -9,21 +11,27 @@ export default function RigViewer({
   url,
   video,
   mocapTime,
+  poseErrors,
   onDurationLoaded,
 }: {
   url: string
   video?: RefObject<HTMLVideoElement>
   mocapTime?: number
+  poseErrors: PoseErrorRegion[]
   onDurationLoaded?: (duration: number) => void
 }) {
   const host = useRef<HTMLDivElement>(null)
   const mocapTimeRef = useRef(mocapTime)
+  const poseErrorsRef = useRef(poseErrors)
   const durationCallbackRef = useRef(onDurationLoaded)
   const presetHandlerRef = useRef<((preset: CameraPreset) => void) | null>(null)
   const [status, setStatus] = useState('Loading 3D Dojo & Rig…')
   const [activePreset, setActivePreset] = useState<CameraPreset | null>(null)
 
-  useLayoutEffect(() => { mocapTimeRef.current = mocapTime }, [mocapTime])
+  useLayoutEffect(() => {
+    mocapTimeRef.current = mocapTime
+    poseErrorsRef.current = poseErrors
+  }, [mocapTime, poseErrors])
   useEffect(() => { durationCallbackRef.current = onDurationLoaded }, [onDurationLoaded])
 
   useEffect(() => {
@@ -125,6 +133,7 @@ export default function RigViewer({
     let mixer: THREE.AnimationMixer | null = null
     let animation: THREE.AnimationAction | null = null
     let model: THREE.Object3D | undefined
+    let highlights: ReturnType<typeof createPoseErrorHighlights> | undefined
     let dojoModel: THREE.Object3D | undefined
     let disposed = false
 
@@ -236,6 +245,7 @@ export default function RigViewer({
           animation.clampWhenFinished = true
           animation.paused = true
           mixer.update(0)
+          highlights = createPoseErrorHighlights(scene, model)
         }
 
         const clipDuration = animation?.getClip().duration ?? 0
@@ -270,6 +280,7 @@ export default function RigViewer({
         const clipDur = animation.getClip().duration || 1
         animation.time = Math.max(0, Math.min(time, clipDur - 0.0005))
         mixer.update(0)
+        highlights?.update(poseErrorsRef.current)
       }
       controls.update()
       renderer.render(scene, camera)
@@ -295,6 +306,7 @@ export default function RigViewer({
       window.removeEventListener('resize', handleResize)
       controls.dispose()
       mixer?.stopAllAction()
+      highlights?.dispose()
       if (model) disposeModel(model)
       if (dojoModel) disposeModel(dojoModel)
       gridHelper.geometry.dispose()
