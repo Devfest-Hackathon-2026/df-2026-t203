@@ -461,7 +461,9 @@ def run_keyposes_worker(video_id: str, video_path: Path, keyposes_dir: Path) -> 
         update_video(video_id, {"status": "error", "error_message": str(exc)})
 
 
-def run_pipeline_worker(rec_id: str, video_path: Path, output_dir: Path) -> None:
+def run_pipeline_worker(
+    rec_id: str, video_path: Path, output_dir: Path, previous_output_dir: Path | None = None,
+) -> None:
     active_logs[rec_id] = [f"[init] Starting motion capture pipeline for {video_path.name}..."]
     active_stages[rec_id] = "Starting..."
 
@@ -472,12 +474,14 @@ def run_pipeline_worker(rec_id: str, video_path: Path, output_dir: Path) -> None
         str(video_path),
         "--out",
         str(output_dir),
+        "--mirror",
         "--export-glb",
         "--export-fbx",
     ]
 
     active_logs[rec_id].append(f"[exec] {' '.join(cmd)}")
 
+    published = False
     try:
         output_dir.mkdir(parents=True, exist_ok=True)
         process = subprocess.Popen(
@@ -530,14 +534,24 @@ def run_pipeline_worker(rec_id: str, video_path: Path, output_dir: Path) -> None
             active_stages[rec_id] = "Completed"
             active_logs[rec_id].append(f"[success] Pipeline finished! Generated {glb_name}")
 
-            update_recording(rec_id, {
+            published = update_recording(rec_id, {
                 "is_processed": True,
                 "status": "completed",
+                "output_dir_name": output_dir.name,
+                "mocap_mirrored": True,
                 "glb_filename": glb_name,
                 "blend_filename": blend_name,
                 "fbx_filename": fbx_name,
                 "keypose_sync": keypose_sync,
-            })
+            }) is not None
+            if (
+                published
+                and previous_output_dir is not None
+                and previous_output_dir.name == rec_id
+                and previous_output_dir.resolve().parent == OUTPUTS_DIR.resolve()
+                and not previous_output_dir.is_symlink()
+            ):
+                shutil.rmtree(previous_output_dir, ignore_errors=True)
         else:
             err = f"Pipeline exited with code {process.returncode} (glb created: {has_glb})"
             active_stages[rec_id] = "Failed"
@@ -554,6 +568,14 @@ def run_pipeline_worker(rec_id: str, video_path: Path, output_dir: Path) -> None
             "status": "error",
             "error_message": str(exc),
         })
+    finally:
+        if (
+            previous_output_dir is not None
+            and not published
+            and output_dir.resolve().parent == OUTPUTS_DIR.resolve()
+            and not output_dir.is_symlink()
+        ):
+            shutil.rmtree(output_dir, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------
@@ -970,16 +992,23 @@ def process_recording(rec_id: str):
         item = get_recording_by_id(rec_id)
         if not item:
             raise HTTPException(status_code=404, detail="Recording not found")
-        if item.get("status") in {"processing", "completed"}:
+        if item.get("status") == "processing" or (
+            item.get("status") == "completed" and item.get("mocap_mirrored")
+        ):
             return {"status": item["status"]}
         video_path = RECORDINGS_DATA_DIR / item["filename"]
         if not video_path.is_file():
             raise HTTPException(status_code=404, detail="Source video file missing")
         output_dir = OUTPUTS_DIR / item["output_dir_name"]
+        previous_output_dir = None
+        if item.get("glb_filename"):
+            # Publish the corrected rig under a new URL only after it is ready.
+            previous_output_dir = output_dir
+            output_dir = OUTPUTS_DIR / f"{video_path.stem}-mirrored-{uuid4().hex}"
         active_stages[rec_id] = "Queued"
         active_logs[rec_id] = []
         update_recording(rec_id, {"status": "processing", "error_message": None})
-        jobs.submit(run_pipeline_worker, rec_id, video_path, output_dir)
+        jobs.submit(run_pipeline_worker, rec_id, video_path, output_dir, previous_output_dir)
 
     return {"message": "Processing started", "status": "processing"}
 
