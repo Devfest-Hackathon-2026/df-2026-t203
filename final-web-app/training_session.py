@@ -22,7 +22,6 @@ from typing import Any, Callable, Dict
 import cv2
 
 from utilities.dtw_scoring import score_transition
-from utilities.handrecognizer import HandRecognizer
 from utilities.mediapipeline import MedaiPipeline
 from utilities.video_mediapipeline import (
     human_analysis_segmentation,
@@ -323,7 +322,6 @@ def build_keypose_sync_for_recording(
 
 async def run_web_training_session(
     websocket,
-    video_info: Dict[str, Any],
     keyposes_dir: Path,
     raw_recording_path: Path,
     final_recording_path: Path,
@@ -362,17 +360,7 @@ async def run_web_training_session(
         except Exception:
             teacher_trajectories = {}
 
-    checkpoint_poses = int(video_info.get("checkpoint_poses") or max(1, total_poses))
-    if checkpoint_poses <= 0:
-        checkpoint_poses = max(1, total_poses)
-
     pipeline = MedaiPipeline(enable_ble=False, ema_alpha=0.65)
-    try:
-        hand_recognizer = HandRecognizer()
-    except Exception as exc:
-        print(f"HandRecognizer init warning: {exc}")
-        hand_recognizer = None
-
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     segment_address = ("127.0.0.1", 5052)
     correction_address = ("127.0.0.1", 5053)
@@ -422,7 +410,6 @@ async def run_web_training_session(
     match_hold_frames = 0
     score_ema = None
     last_overlay_frame_sent = 0.0
-    checkpoint_waiting_paused = False
     should_stop = False
 
     def record_pose_match(matched_pose_id: int) -> None:
@@ -457,65 +444,18 @@ async def run_web_training_session(
                         state = "PAUSED"
                     elif msg_type == "SKIP_POSE" and state == "PAUSED":
                         next_timestamp = timestamps.get(str(pose_id + 1))
-                        if ((pose_id + 1) % checkpoint_poses) == 0 and next_timestamp is not None:
-                            state = "CHECKPOINT"
-                            checkpoint_waiting_paused = False
-                            match_hold_frames = 0
-                            score_ema = None
-                        elif next_timestamp is not None:
+                        if next_timestamp is not None:
                             record_pose_match(pose_id)
                             await websocket.send_json({"action": "play_until", "target_time": next_timestamp})
                             state = "PLAYING"
                             pose_id += 1
                             current_target_pose = str(pose_id)
-                            timestamp = next_timestamp
                             match_hold_frames = 0
                             score_ema = None
                         else:
                             record_pose_match(pose_id)
                             should_stop = True
                             break
-                    elif msg_type == "CHECKPOINT_ACTION" and state == "CHECKPOINT":
-                        ui_action = data.get("action")
-                        if ui_action == "Thumb_Up":
-                            next_timestamp = timestamps.get(str(pose_id + 1))
-                            record_pose_match(pose_id)
-                            if next_timestamp is not None:
-                                await websocket.send_json({"action": "play_until", "target_time": next_timestamp})
-                                state = "PLAYING"
-                                checkpoint_waiting_paused = False
-                                pose_id += 1
-                                current_target_pose = str(pose_id)
-                                timestamp = next_timestamp
-                                match_hold_frames = 0
-                                score_ema = None
-                            else:
-                                should_stop = True
-                                break
-                        elif ui_action == "Thumb_Down":
-                            pose_id = max(0, pose_id - checkpoint_poses + 1)
-                            next_timestamp = timestamps.get(str(pose_id))
-                            if next_timestamp is not None:
-                                await websocket.send_json({"action": "seek", "seek_time": next_timestamp})
-                                await websocket.send_json({"action": "pause"})
-                                current_target_pose = str(pose_id)
-                                timestamp = next_timestamp
-                                current_pose_arrive_frame = frames_written
-                                match_hold_frames = 0
-                                score_ema = None
-                                student_transition_poses = []
-                                replay_target = timestamps.get(str(pose_id + 1))
-                                if replay_target is not None:
-                                    record_pose_match(pose_id)
-                                    await websocket.send_json({"action": "play_until", "target_time": replay_target})
-                                    state = "PLAYING"
-                                    checkpoint_waiting_paused = False
-                                    pose_id += 1
-                                    current_target_pose = str(pose_id)
-                                    timestamp = replay_target
-                                else:
-                                    state = "PAUSED"
-                                    checkpoint_waiting_paused = False
                 except asyncio.TimeoutError:
                     break
 
@@ -533,17 +473,10 @@ async def run_web_training_session(
 
             # 2. Process frame for pose matching and overlay visualization
             display_student = student_frame.copy()
-            action = None
             worst_joint_names = []
 
-            if state in ("PAUSED", "CHECKPOINT"):
+            if state == "PAUSED":
                 _, pose, world_pose, smoothed_world = pipeline.mark_frame(display_student, draw_landmarks=False)
-                if hand_recognizer is not None:
-                    try:
-                        action = hand_recognizer.mark_frame(student_frame, int(time.time() * 1000))
-                    except Exception:
-                        action = None
-
                 if world_pose is not None and smoothed_world is not None:
                     try:
                         segments = human_analysis_segmentation(world_pose)
@@ -629,19 +562,12 @@ async def run_web_training_session(
                                     student_transition_poses = []
                                     next_timestamp = timestamps.get(str(pose_id + 1))
 
-                                    if ((pose_id + 1) % checkpoint_poses) == 0 and next_timestamp is not None:
-                                        state = "CHECKPOINT"
-                                        checkpoint_waiting_paused = False
-                                        match_hold_frames = 0
-                                        score_ema = None
-                                        action = None
-                                    elif next_timestamp is not None:
+                                    if next_timestamp is not None:
                                         record_pose_match(pose_id)
                                         await websocket.send_json({"action": "play_until", "target_time": next_timestamp})
                                         state = "PLAYING"
                                         pose_id += 1
                                         current_target_pose = str(pose_id)
-                                        timestamp = next_timestamp
                                         match_hold_frames = 0
                                         score_ema = None
                                     else:
@@ -671,63 +597,6 @@ async def run_web_training_session(
                                         2,
                                         cv2.LINE_AA,
                                     )
-
-            if state == "CHECKPOINT":
-                if not checkpoint_waiting_paused:
-                    await websocket.send_json({"action": "pause"})
-                    checkpoint_waiting_paused = True
-                cv2.putText(
-                    display_student,
-                    "CHECKPOINT: Thumbs Up to continue / Thumbs Down to retry",
-                    (20, 60),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.65,
-                    (0, 255, 255),
-                    2,
-                    cv2.LINE_AA,
-                )
-
-                if action == "Thumb_Up":
-                    next_timestamp = timestamps.get(str(pose_id + 1))
-                    record_pose_match(pose_id)
-                    if next_timestamp is not None:
-                        await websocket.send_json({"action": "play_until", "target_time": next_timestamp})
-                        state = "PLAYING"
-                        checkpoint_waiting_paused = False
-                        pose_id += 1
-                        current_target_pose = str(pose_id)
-                        timestamp = next_timestamp
-                        match_hold_frames = 0
-                        score_ema = None
-                        action = None
-                    else:
-                        should_stop = True
-                        break
-                elif action == "Thumb_Down":
-                    pose_id = max(0, pose_id - checkpoint_poses + 1)
-                    next_timestamp = timestamps.get(str(pose_id))
-                    if next_timestamp is not None:
-                        await websocket.send_json({"action": "seek", "seek_time": next_timestamp})
-                        await websocket.send_json({"action": "pause"})
-                        current_target_pose = str(pose_id)
-                        timestamp = next_timestamp
-                        current_pose_arrive_frame = frames_written
-                        match_hold_frames = 0
-                        score_ema = None
-                        student_transition_poses = []
-                        action = None
-                        replay_target = timestamps.get(str(pose_id + 1))
-                        if replay_target is not None:
-                            record_pose_match(pose_id)
-                            await websocket.send_json({"action": "play_until", "target_time": replay_target})
-                            state = "PLAYING"
-                            checkpoint_waiting_paused = False
-                            pose_id += 1
-                            current_target_pose = str(pose_id)
-                            timestamp = replay_target
-                        else:
-                            state = "PAUSED"
-                            checkpoint_waiting_paused = False
 
             elif state == "PLAYING":
                 _, pose, world_pose, smoothed_world = pipeline.mark_frame(display_student, draw_landmarks=False)

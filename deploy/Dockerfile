@@ -14,7 +14,7 @@ RUN python -m venv /opt/api && /opt/api/bin/pip install --no-cache-dir -r /tmp/r
        mediapipe==0.10.9 numpy==1.23.5 opencv-contrib-python==4.11.0.86 \
     && python -m venv /opt/skellyforge && /opt/skellyforge/bin/pip install --no-cache-dir \
        'skellyforge @ git+https://github.com/freemocap/skellyforge@b96272b1ef06546c1a55d404a5f4a92f1fad1b0f'
-RUN mkdir -p /opt/blender /opt/models \
+RUN mkdir -p /opt/blender \
     && archive="blender-${BLENDER_VERSION}-linux-x64.tar.xz" \
     && base=https://download.blender.org/release/Blender4.5 \
     && cd /tmp \
@@ -22,8 +22,6 @@ RUN mkdir -p /opt/blender /opt/models \
     && curl -fsS "$base/blender-${BLENDER_VERSION}.sha256" | awk -v name="$archive" '$2 == name || $2 == "*" name' > blender.sha256 \
     && sha256sum --check blender.sha256 \
     && tar -xJf "$archive" --strip-components=1 -C /opt/blender \
-    && curl -fsSL https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task \
-       -o /opt/models/gesture_recognizer.task \
     && landmarks_site="$(/opt/landmarks/bin/python -c 'import sysconfig; print(sysconfig.get_path("purelib"))')" \
     && curl -fsSL https://storage.googleapis.com/mediapipe-assets/pose_landmark_heavy.tflite \
        -o "$landmarks_site/mediapipe/modules/pose_landmark/pose_landmark_heavy.tflite"
@@ -46,7 +44,6 @@ ENV PATH=/opt/api/bin:$PATH \
     MEDIAPIPE_PYTHON=/opt/landmarks/bin/python \
     SKELLYFORGE_PYTHON=/opt/skellyforge/bin/python \
     BLENDER_EXE=/opt/blender/blender \
-    MOTIONLEARN_GESTURE_MODEL=/opt/models/gesture_recognizer.task \
     MOTIONLEARN_DATA_DIR=/data \
     MOTIONLEARN_DIST=/app/dist \
     PYTHONUNBUFFERED=1
