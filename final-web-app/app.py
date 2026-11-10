@@ -16,6 +16,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 import json
 import logging
+import math
 import os
 from pathlib import Path
 import shutil
@@ -43,6 +44,7 @@ if str(WEB_APP_DIR) not in sys.path:
 
 from training_session import build_keypose_sync_for_recording, run_web_training_session  # noqa: E402
 from browser_training import run_browser_training  # noqa: E402
+from utilities.keyposes import recording_keypose_times  # noqa: E402
 
 DATA_DIR = Path(os.environ["MOTIONLEARN_DATA_DIR"]).resolve() if "MOTIONLEARN_DATA_DIR" in os.environ else None
 DEFAULT_DIST = WEB_APP_DIR / "dist"
@@ -1007,6 +1009,35 @@ def get_recording_feedback(rec_id: str):
         raise HTTPException(status_code=404, detail="Recording not found")
     path = RECORDINGS_DATA_DIR / f"{rec_id}.feedback.json"
     return FileResponse(path, media_type="application/json") if path.is_file() else []
+
+
+@app.get("/api/recordings/{rec_id}/keyposes")
+def get_recording_keyposes(rec_id: str) -> list[float]:
+    item = get_recording_by_id(rec_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Recording not found")
+
+    matches = set()
+    if item.get("video_id") != "misc_mocap":
+        for pose in item.get("keypose_sync") or []:
+            if not isinstance(pose, dict):
+                continue
+            timestamp = pose.get("mocap_match_time")
+            if isinstance(timestamp, (int, float)) and math.isfinite(timestamp) and timestamp >= 0:
+                matches.add(timestamp)
+    if matches:
+        return sorted(matches)
+
+    if not item.get("glb_filename") or item.get("status") == "processing":
+        return []
+    landmarks = OUTPUTS_DIR / item["output_dir_name"] / "landmarks.json"
+    try:
+        return list(recording_keypose_times(landmarks, landmarks.stat().st_mtime_ns))
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        logging.warning("Could not read key poses for recording %s", rec_id, exc_info=True)
+        return []
 
 
 @app.delete("/api/recordings/{rec_id}")

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 export interface Teacher {
   id: string
@@ -9,6 +9,7 @@ export interface Teacher {
   checkpoint_interval: number | null
   checkpoint_poses: number
   keypose_count: number
+  timestamps?: Record<string, number>
   error_message?: string
 }
 
@@ -68,7 +69,9 @@ export function useLibrary() {
   const [recordings, setRecordings] = useState<Recording[]>([])
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
+  const recordingsRevision = useRef(0)
   const refresh = useCallback(async (signal?: AbortSignal) => {
+    const revision = recordingsRevision.current
     try {
       const [videos, takes] = await Promise.all([
         request<Teacher[]>('/api/videos', { signal }),
@@ -76,13 +79,23 @@ export function useLibrary() {
       ])
       if (signal?.aborted) return
       setTeachers(videos)
-      setRecordings(takes)
+      if (revision === recordingsRevision.current) setRecordings(takes)
       setError('')
     } catch (err) {
       if (!signal?.aborted) setError((err as Error).message)
     } finally {
       if (!signal?.aborted) setLoading(false)
     }
+  }, [])
+
+  const deleteRecording = useCallback(async (recording: Recording) => {
+    const result = await request<{ recordings: Recording[] }>(
+      `/api/recordings/${encodeURIComponent(recording.id)}`,
+      { method: 'DELETE' },
+    )
+    // A poll started before the delete may still contain the removed recording.
+    recordingsRevision.current += 1
+    setRecordings(result.recordings)
   }, [])
 
   useEffect(() => {
@@ -96,7 +109,7 @@ export function useLibrary() {
     return () => { controller.abort(); window.clearTimeout(timer) }
   }, [refresh])
 
-  return { teachers, recordings, error, loading, refresh }
+  return { teachers, recordings, error, loading, refresh, deleteRecording }
 }
 
 export const teacherUrl = (filename: string) => `/teacher_videos/${encodeURIComponent(filename)}`

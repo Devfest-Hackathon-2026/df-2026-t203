@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type RefObject } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from 'react'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
@@ -23,7 +23,7 @@ export default function RigViewer({
   const [status, setStatus] = useState('Loading 3D Dojo & Rig…')
   const [activePreset, setActivePreset] = useState<CameraPreset | null>(null)
 
-  useEffect(() => { mocapTimeRef.current = mocapTime }, [mocapTime])
+  useLayoutEffect(() => { mocapTimeRef.current = mocapTime }, [mocapTime])
   useEffect(() => { durationCallbackRef.current = onDurationLoaded }, [onDurationLoaded])
 
   useEffect(() => {
@@ -54,6 +54,7 @@ export default function RigViewer({
       renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false, powerPreference: 'high-performance' })
     } catch {
       setStatus('WebGL is unavailable in this browser.')
+      durationCallbackRef.current?.(0)
       return
     }
 
@@ -235,10 +236,10 @@ export default function RigViewer({
           animation.clampWhenFinished = true
           animation.paused = true
           mixer.update(0)
-          if (clip.duration > 0) {
-            durationCallbackRef.current?.(clip.duration)
-          }
         }
+
+        const clipDuration = animation?.getClip().duration ?? 0
+        durationCallbackRef.current?.(clipDuration)
 
         // Frame the 1.75x avatar inside the Dojo
         const box = new THREE.Box3().setFromObject(model)
@@ -250,11 +251,13 @@ export default function RigViewer({
           controls.update()
         }
 
-        setStatus('')
+        setStatus(clipDuration > 0 ? '' : 'The generated 3D rig has no animation.')
       },
       (e) => !disposed && e.total && setStatus(`Loading 3D rig… ${Math.round((e.loaded / e.total) * 100)}%`),
       () => {
-        if (!disposed) setStatus('Could not load the generated 3D rig.')
+        if (disposed) return
+        setStatus('Could not load the generated 3D rig.')
+        durationCallbackRef.current?.(0)
       },
     )
 
